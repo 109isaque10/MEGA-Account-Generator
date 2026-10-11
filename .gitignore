@@ -1,2 +1,5 @@
 .venv
 *.csv
+*.json
+.aistudio
+mega-manager

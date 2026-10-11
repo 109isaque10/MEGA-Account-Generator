@@ -225,38 +225,60 @@ func main() {
 			return
 		}
 
+		recipient := strings.ToLower(strings.Trim(strings.TrimSpace(payload.Recipient), "<>\"'"))
+
 		// Verify signature if key is set
 		if cfg.MailgunSigningKey != "" {
 			if !mailgun.VerifySignature(cfg.MailgunSigningKey, payload.Timestamp, payload.Token, payload.Signature) {
-				addLog("error", i18n.T("en", "msg_webhook_unauthorized"))
+				addLog("error", fmt.Sprintf("Mailgun webhook signature invalid for recipient %s. Check MAILGUN_WEBHOOK_SIGNING_KEY.", recipient))
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
 		}
 
-		addLog("info", i18n.T("en", "msg_webhook_received", payload.Recipient))
+		addLog("info", i18n.T("en", "msg_webhook_received", recipient))
 
-		// Search account
-		acc, exists := store.Get(payload.Recipient)
+		// Search account: try exact match first
+		acc, exists := store.Get(recipient)
 		if !exists || acc.VerifyCommand == "" {
-			addLog("warning", fmt.Sprintf("No pending registration found for recipient %s", payload.Recipient))
+			// Fallback: try matching by local-part username (e.g., mega2) across pending accounts
+			localPart := recipient
+			if idx := strings.Index(recipient, "@"); idx != -1 {
+				localPart = recipient[:idx]
+			}
+			for _, candidate := range store.List() {
+				candLocal := candidate.Email
+				if idx := strings.Index(candidate.Email, "@"); idx != -1 {
+					candLocal = candidate.Email[:idx]
+				}
+				if strings.EqualFold(candLocal, localPart) && candidate.VerifyCommand != "" {
+					acc = candidate
+					exists = true
+					addLog("info", fmt.Sprintf("Matched pending account %s by username prefix '%s'", candidate.Email, localPart))
+					break
+				}
+			}
+		}
+
+		if !exists || acc.VerifyCommand == "" {
+			addLog("warning", fmt.Sprintf("No pending registration found for recipient %s (ensure generation was started first)", recipient))
 			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("No matching pending account"))
 			return
 		}
 
-		// Extract URL from body
-		emailBody := payload.BodyPlain
-		if emailBody == "" {
-			emailBody = payload.StrippedText
+		// Extract URL: try plain body, then HTML body, then stripped text
+		confirmURL, err := mega.ExtractConfirmationURL(payload.BodyPlain)
+		if err != nil {
+			confirmURL, err = mega.ExtractConfirmationURL(payload.BodyHtml)
 		}
-		if emailBody == "" {
-			emailBody = payload.BodyHtml
+		if err != nil {
+			confirmURL, err = mega.ExtractConfirmationURL(payload.StrippedText)
 		}
 
-		confirmURL, err := mega.ExtractConfirmationURL(emailBody)
 		if err != nil {
 			addLog("error", fmt.Sprintf("Failed to extract confirmation URL from email: %v", err))
-			_ = store.MarkFailed(payload.Recipient, "No confirmation link in email body")
+			_ = store.MarkFailed(acc.Email, "No confirmation link in email body")
 			w.WriteHeader(http.StatusOK)
 			return
 		}

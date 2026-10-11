@@ -109,6 +109,13 @@ func ParseWebhook(r *http.Request) (*WebhookPayload, error) {
 	if recipient == "" {
 		recipient = r.FormValue("To")
 	}
+	if recipient == "" {
+		recipient = r.FormValue("to")
+	}
+
+	// Normalize recipient: remove <>, quotes, lowercase
+	recipient = strings.Trim(strings.TrimSpace(recipient), "<>\"'")
+	recipient = strings.ToLower(recipient)
 
 	bodyPlain := r.FormValue("body-plain")
 	if bodyPlain == "" {
@@ -117,16 +124,19 @@ func ParseWebhook(r *http.Request) (*WebhookPayload, error) {
 	if bodyPlain == "" {
 		bodyPlain = r.FormValue("body-html")
 	}
+	if bodyPlain == "" {
+		bodyPlain = r.FormValue("stripped-html")
+	}
 
 	return &WebhookPayload{
-		Recipient:    strings.TrimSpace(recipient),
+		Recipient:    recipient,
 		Sender:       strings.TrimSpace(r.FormValue("sender")),
 		Subject:      strings.TrimSpace(r.FormValue("subject")),
 		BodyPlain:    bodyPlain,
 		StrippedText: r.FormValue("stripped-text"),
 		BodyHtml:     r.FormValue("body-html"),
-		Timestamp:    r.FormValue("timestamp"),
-		Token:        r.FormValue("token"),
-		Signature:    r.FormValue("signature"),
+		Timestamp:    strings.TrimSpace(r.FormValue("timestamp")),
+		Token:        strings.TrimSpace(r.FormValue("token")),
+		Signature:    strings.TrimSpace(r.FormValue("signature")),
 	}, nil
 }

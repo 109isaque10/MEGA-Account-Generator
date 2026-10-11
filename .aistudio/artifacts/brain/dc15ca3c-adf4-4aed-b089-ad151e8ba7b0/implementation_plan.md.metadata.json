@@ -1,6 +1,0 @@
-{
-  "summary":  "Implementation plan for converting the MEGA Account Generator to Go with Mailgun webhooks, low-overhead background periodic sign-in daemon, web dashboard with i18n dynamic strings, CSV/SQLite/JSON storage, multi-stage scratch Dockerfile, and GitHub Actions workflow.",
-  "updatedAt":  "2026-10-11T14:31:42.034243273Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

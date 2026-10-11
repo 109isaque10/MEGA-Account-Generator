@@ -129,14 +129,32 @@ func (c *Client) LoginCheck(ctx context.Context, email, password string) error {
 // ExtractConfirmationURL finds links from email plain body or html
 func ExtractConfirmationURL(text string) (string, error) {
 	urls := urlRegex.FindAllString(text, -1)
+
+	// 1. Prioritize MEGA URLs specifically containing the confirmation hash/token
 	for _, u := range urls {
 		clean := strings.TrimRight(u, ".,;:\"'>)]}")
-		if strings.Contains(clean, "mega.nz") || strings.Contains(clean, "mega.co.nz") {
+		isMega := strings.Contains(clean, "mega.nz") || strings.Contains(clean, "mega.co.nz") || strings.Contains(clean, "mega.io")
+		if isMega && (strings.Contains(clean, "#confirm") || strings.Contains(clean, "confirm")) {
 			return clean, nil
 		}
 	}
-	if len(urls) > 0 {
-		return urls[0], nil
+
+	// 2. Any URL containing confirm or #confirm
+	for _, u := range urls {
+		clean := strings.TrimRight(u, ".,;:\"'>)]}")
+		if strings.Contains(clean, "#confirm") || strings.Contains(clean, "confirm") {
+			return clean, nil
+		}
 	}
-	return "", fmt.Errorf("no URL found in email body")
+
+	// 3. Fallback to any non-root MEGA URL (excluding plain https://mega.nz/ or https://mega.io/)
+	for _, u := range urls {
+		clean := strings.TrimRight(u, ".,;:\"'>)]}")
+		isMega := strings.Contains(clean, "mega.nz") || strings.Contains(clean, "mega.co.nz") || strings.Contains(clean, "mega.io")
+		if isMega && clean != "https://mega.nz/" && clean != "https://mega.nz" && clean != "https://mega.io/" && clean != "https://mega.io" {
+			return clean, nil
+		}
+	}
+
+	return "", fmt.Errorf("no confirmation URL found in email body")
 }
