@@ -130,28 +130,19 @@ func (c *Client) LoginCheck(ctx context.Context, email, password string) error {
 func ExtractConfirmationURL(text string) (string, error) {
 	urls := urlRegex.FindAllString(text, -1)
 
-	// 1. Prioritize MEGA URLs specifically containing the confirmation hash/token
+	// Look specifically for MEGA confirmation URLs containing #confirm
 	for _, u := range urls {
 		clean := strings.TrimRight(u, ".,;:\"'>)]}")
 		isMega := strings.Contains(clean, "mega.nz") || strings.Contains(clean, "mega.co.nz") || strings.Contains(clean, "mega.io")
-		if isMega && (strings.Contains(clean, "#confirm") || strings.Contains(clean, "confirm")) {
+		if isMega && strings.Contains(clean, "#confirm") {
 			return clean, nil
 		}
 	}
 
-	// 2. Any URL containing confirm or #confirm
+	// Secondary check: any link with #confirm
 	for _, u := range urls {
 		clean := strings.TrimRight(u, ".,;:\"'>)]}")
-		if strings.Contains(clean, "#confirm") || strings.Contains(clean, "confirm") {
-			return clean, nil
-		}
-	}
-
-	// 3. Fallback to any non-root MEGA URL (excluding plain https://mega.nz/ or https://mega.io/)
-	for _, u := range urls {
-		clean := strings.TrimRight(u, ".,;:\"'>)]}")
-		isMega := strings.Contains(clean, "mega.nz") || strings.Contains(clean, "mega.co.nz") || strings.Contains(clean, "mega.io")
-		if isMega && clean != "https://mega.nz/" && clean != "https://mega.nz" && clean != "https://mega.io/" && clean != "https://mega.io" {
+		if strings.Contains(clean, "#confirm") {
 			return clean, nil
 		}
 	}

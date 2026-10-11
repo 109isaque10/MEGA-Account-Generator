@@ -228,6 +228,7 @@ func (s *Store) MarkVerified(email string) error {
 	}
 
 	acc.Status = "verified"
+	acc.VerifyCommand = "" // Cleared so follow-up emails cannot re-trigger verification
 	acc.ErrorMessage = ""
 	_ = s.saveToJSON()
 	return s.appendToCSV(acc)

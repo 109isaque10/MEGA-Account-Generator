@@ -240,6 +240,15 @@ func main() {
 
 		// Search account: try exact match first
 		acc, exists := store.Get(recipient)
+
+		// If account already verified, ignore follow-up onboarding/welcome emails gracefully
+		if exists && acc.Status == "verified" {
+			addLog("info", fmt.Sprintf("Account %s is already verified, ignoring follow-up onboarding email.", acc.Email))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("Account already verified"))
+			return
+		}
+
 		if !exists || acc.VerifyCommand == "" {
 			// Fallback: try matching by local-part username (e.g., mega2) across pending accounts
 			localPart := recipient
@@ -251,11 +260,19 @@ func main() {
 				if idx := strings.Index(candidate.Email, "@"); idx != -1 {
 					candLocal = candidate.Email[:idx]
 				}
-				if strings.EqualFold(candLocal, localPart) && candidate.VerifyCommand != "" {
-					acc = candidate
-					exists = true
-					addLog("info", fmt.Sprintf("Matched pending account %s by username prefix '%s'", candidate.Email, localPart))
-					break
+				if strings.EqualFold(candLocal, localPart) {
+					if candidate.Status == "verified" {
+						addLog("info", fmt.Sprintf("Account %s is already verified, ignoring follow-up onboarding email.", candidate.Email))
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte("Account already verified"))
+						return
+					}
+					if candidate.VerifyCommand != "" {
+						acc = candidate
+						exists = true
+						addLog("info", fmt.Sprintf("Matched pending account %s by username prefix '%s'", candidate.Email, localPart))
+						break
+					}
 				}
 			}
 		}
