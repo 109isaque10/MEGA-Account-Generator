@@ -1,18 +1,34 @@
 services:
   mega-manager:
-    build: .
+    image: ghcr.io/109isaque10/mega-account-generator:latest
+    container_name: mega-account-manager
+    restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
-      PORT: "3000"
-      EMAIL_PATTERN: "${EMAIL_PATTERN:-mega%d}"
-      EMAIL_DOMAIN: "${EMAIL_DOMAIN:-example.com}"
-      SIGNIN_INTERVAL_DAYS: "${SIGNIN_INTERVAL_DAYS:-30}"
-      MAILGUN_API_KEY: "${MAILGUN_API_KEY:-}"
-      MAILGUN_WEBHOOK_SIGNING_KEY: "${MAILGUN_WEBHOOK_SIGNING_KEY:-}"
-      MEGATOOLS_PATH: "/usr/local/bin/megatools"
-      MEGA_DEFAULT_PASSWORD: "${MEGA_DEFAULT_PASSWORD:-}"
-      DATA_DIR: "/data"
+      # Port to listen on
+      - PORT=3000
+
+      # Email pattern and domain for account generation
+      - EMAIL_PATTERN=mega%d
+      - EMAIL_DOMAIN=yourdomain.com
+
+      # Periodic keep-alive interval in days
+      - SIGNIN_INTERVAL_DAYS=30
+
+      # Mailgun webhook credentials (optional: bypasses signature check if omitted)
+      - MAILGUN_API_KEY=
+      - MAILGUN_WEBHOOK_SIGNING_KEY=
+
+      # Optional default password (if empty, random strong password generated)
+      - MEGA_DEFAULT_PASSWORD=
+
+      # Path to megatools binary inside scratch image
+      - MEGATOOLS_PATH=/usr/local/bin/megatools
+
+      # Persistence directory for accounts.csv and accounts.json
+      - DATA_DIR=/data
+
     volumes:
+      # Mount directory on host to persist accounts.csv and accounts.json
       - ./data:/data
-    restart: unless-stopped

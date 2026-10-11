@@ -82,25 +82,31 @@ Visit `http://localhost:3000` in your browser.
 
 ---
 
-## Docker & Scratch Build
+## Docker Compose (Recommended for Homelab)
 
-Build the minimal scratch container locally:
+Launch instantly using the multi-arch `ghcr.io` image (`linux/amd64` and `linux/arm64`):
 
 ```bash
-docker build -t mega-manager:latest .
-docker run -d \
-  -p 3000:3000 \
-  -e EMAIL_DOMAIN="mycustomdomain.com" \
-  -e EMAIL_PATTERN="mega%d" \
-  -v $(pwd)/data:/data \
-  mega-manager:latest
+# 1. Edit compose.yml with your EMAIL_DOMAIN and optional Mailgun keys
+# 2. Start the daemon
+docker compose up -d
 ```
 
 ---
 
-## GitHub Actions
+## Docker & Multi-Arch Scratch Build
 
-The workflow located at `.github/workflows/docker.yml` automatically triggers on push to `main`/`master` or release tags, building and publishing the minimal scratch container to GitHub Container Registry.
+Build the multi-architecture container locally (`linux/amd64` and `linux/arm64`):
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -t mega-manager:latest .
+```
+
+---
+
+## GitHub Actions CI/CD
+
+The workflow located at `.github/workflows/docker.yml` automatically builds multi-arch images (`linux/amd64,linux/arm64`) on push to `main`/`master` or release tags, publishing them directly to GitHub Container Registry (`ghcr.io`).
 
 ---
 
