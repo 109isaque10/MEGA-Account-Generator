@@ -1,0 +1,18 @@
+services:
+  mega-manager:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      EMAIL_PATTERN: "${EMAIL_PATTERN:-mega%d}"
+      EMAIL_DOMAIN: "${EMAIL_DOMAIN:-example.com}"
+      SIGNIN_INTERVAL_DAYS: "${SIGNIN_INTERVAL_DAYS:-30}"
+      MAILGUN_API_KEY: "${MAILGUN_API_KEY:-}"
+      MAILGUN_WEBHOOK_SIGNING_KEY: "${MAILGUN_WEBHOOK_SIGNING_KEY:-}"
+      MEGATOOLS_PATH: "/usr/local/bin/megatools"
+      MEGA_DEFAULT_PASSWORD: "${MEGA_DEFAULT_PASSWORD:-}"
+      DATA_DIR: "/data"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
