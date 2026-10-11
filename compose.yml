@@ -23,8 +23,8 @@ services:
       # Optional default password (if empty, random strong password generated)
       - MEGA_DEFAULT_PASSWORD=
 
-      # Path to megatools binary inside scratch image
-      - MEGATOOLS_PATH=/usr/local/bin/megatools
+      # Path to megatools binary
+      - MEGATOOLS_PATH=megatools
 
       # Persistence directory for accounts.csv and accounts.json
       - DATA_DIR=/data
