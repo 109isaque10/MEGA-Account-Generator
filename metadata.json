@@ -1,0 +1,8 @@
+{
+  "name": "MEGA Account Manager",
+  "description": "Golang service for automated MEGA.nz account generation via Mailgun webhooks and periodic keep-alive background daemon.",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ],
+  "permissions": []
+}

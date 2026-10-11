@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title data-i18n="app_title">MEGA Account Manager</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-container">
+      <div class="brand-section">
+        <div class="brand-logo">M</div>
+        <div>
+          <h1 class="brand-title" data-i18n="app_title"></h1>
+          <p class="brand-subtitle" data-i18n="app_subtitle"></p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <select id="langSelect" class="lang-select" aria-label="Language">
+          <option value="en">English</option>
+          <option value="pt">Português</option>
+          <option value="es">Español</option>
+        </select>
+        <button id="btnRefresh" class="btn btn-secondary btn-sm" data-i18n="btn_refresh"></button>
+      </div>
+    </div>
+  </header>
+
+  <main class="main-content">
+    <!-- Stats Cards -->
+    <section class="stats-grid">
+      <div class="stat-card total">
+        <span class="stat-label" data-i18n="stat_total_accounts"></span>
+        <span class="stat-value" id="valTotalAccounts">0</span>
+        <span class="stat-meta" id="valPatternDomain"></span>
+      </div>
+      <div class="stat-card active">
+        <span class="stat-label" data-i18n="stat_active_accounts"></span>
+        <span class="stat-value" id="valActiveAccounts">0</span>
+        <span class="stat-meta" data-i18n="badge_verified"></span>
+      </div>
+      <div class="stat-card pending">
+        <span class="stat-label" data-i18n="stat_pending_verification"></span>
+        <span class="stat-value" id="valPendingAccounts">0</span>
+        <span class="stat-meta" data-i18n="badge_pending"></span>
+      </div>
+      <div class="stat-card schedule">
+        <span class="stat-label" data-i18n="stat_next_keepalive"></span>
+        <span class="stat-value" id="valNextKeepalive" style="font-size: 1.2rem;">--</span>
+        <span class="stat-meta" id="valKeepaliveInterval"></span>
+      </div>
+    </section>
+
+    <!-- Split Layout -->
+    <div class="dashboard-layout">
+      <!-- Left Column: Generator & Webhook Config -->
+      <div style="display: flex; flex-direction: column; gap: 1.5rem;">
+        <!-- Generator Panel -->
+        <div class="card-panel">
+          <div class="panel-header">
+            <span class="panel-title" data-i18n="btn_generate"></span>
+            <span class="code-pill" id="badgeNextEmail"></span>
+          </div>
+          <div class="panel-body">
+            <form id="genForm">
+              <div class="form-group">
+                <label class="form-label" for="inputCount" data-i18n="lbl_accounts_to_generate"></label>
+                <input type="number" id="inputCount" class="input-number" min="1" max="50" value="1" required>
+              </div>
+              <div class="form-group" style="margin-top: 0.85rem;">
+                <label class="form-label" for="inputPassword" data-i18n="lbl_custom_password"></label>
+                <input type="password" id="inputPassword" class="input-text" placeholder="••••••••••••" autocomplete="new-password">
+                <span class="input-hint" id="hintPattern"></span>
+              </div>
+              <div style="margin-top: 1.2rem;">
+                <button type="submit" id="btnSubmitGen" class="btn btn-primary" style="width: 100%;">
+                  <span data-i18n="btn_generate"></span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <!-- Mailgun Webhook Configuration Panel -->
+        <div class="card-panel">
+          <div class="panel-header">
+            <span class="panel-title" data-i18n="nav_webhooks"></span>
+            <span class="code-pill">POST /api/webhooks/mailgun</span>
+          </div>
+          <div class="panel-body">
+            <p style="font-size: 0.82rem; color: var(--text-secondary);" data-i18n="lbl_webhook_hint"></p>
+            <div class="copy-url-group">
+              <input type="text" id="webhookUrlInput" class="input-text code-pill" readonly>
+              <button id="btnCopyWebhook" class="btn btn-secondary btn-sm" data-i18n="btn_copy"></button>
+            </div>
+
+            <!-- Simulation test form -->
+            <div style="margin-top: 0.5rem; border-top: 1px solid var(--border-color); padding-top: 0.85rem;">
+              <span class="panel-title" style="font-size: 0.82rem; margin-bottom: 0.4rem; display: block;" data-i18n="btn_simulate_webhook"></span>
+              <textarea id="simulatePayload" class="input-text" style="width: 100%; height: 75px; font-family: var(--font-mono); font-size: 0.75rem;" placeholder=""></textarea>
+              <button id="btnSimulate" class="btn btn-secondary btn-sm" style="width: 100%; margin-top: 0.5rem;" data-i18n="btn_simulate_webhook"></button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Activity Logs Box -->
+        <div class="card-panel">
+          <div class="panel-header">
+            <span class="panel-title" data-i18n="nav_logs"></span>
+            <button id="btnClearLogs" class="btn btn-secondary btn-sm" style="font-size: 0.7rem;">Clear</button>
+          </div>
+          <div class="panel-body" style="padding: 0.75rem;">
+            <div id="logsBox" class="logs-container"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Column: Accounts Table & Actions -->
+      <div class="card-panel">
+        <div class="panel-header">
+          <span class="panel-title" data-i18n="nav_accounts"></span>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <button id="btnKeepAliveNow" class="btn btn-accent btn-sm" data-i18n="btn_trigger_keepalive"></button>
+            <a href="/api/accounts/export.csv" class="btn btn-secondary btn-sm" data-i18n="btn_export_csv" download></a>
+            <a href="/api/accounts/export.json" class="btn btn-secondary btn-sm" data-i18n="btn_export_json" download></a>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="table-controls">
+            <input type="text" id="tableSearch" class="input-text search-input" placeholder="" data-i18n-placeholder="lbl_search">
+          </div>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th data-i18n="lbl_email"></th>
+                  <th data-i18n="lbl_mega_password"></th>
+                  <th data-i18n="lbl_status"></th>
+                  <th data-i18n="lbl_last_check"></th>
+                  <th data-i18n="lbl_created_at"></th>
+                  <th data-i18n="lbl_actions"></th>
+                </tr>
+              </thead>
+              <tbody id="accountsTableBody">
+                <!-- Dynamically populated -->
+              </tbody>
+            </table>
+          </div>
+          <div id="emptyAccountsState" class="empty-state" style="display: none;">
+            <p data-i18n="lbl_no_accounts"></p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
