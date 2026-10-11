@@ -20,6 +20,7 @@ import (
 	"github.com/109isaque10/mega-account-generator/pkg/i18n"
 	"github.com/109isaque10/mega-account-generator/pkg/mailgun"
 	"github.com/109isaque10/mega-account-generator/pkg/mega"
+	"github.com/109isaque10/mega-account-generator/pkg/rclone"
 	"github.com/109isaque10/mega-account-generator/pkg/scheduler"
 	"github.com/109isaque10/mega-account-generator/pkg/storage"
 )
@@ -33,9 +34,19 @@ type LogItem struct {
 	Msg   string `json:"msg"`
 }
 
+type GenProgress struct {
+	sync.Mutex
+	Active       bool   `json:"active"`
+	Total        int    `json:"total"`
+	Completed    int    `json:"completed"`
+	CurrentEmail string `json:"current_email"`
+	Status       string `json:"status"` // "idle", "generating", "done"
+}
+
 var (
-	logMu   sync.RWMutex
-	logRing []LogItem
+	logMu       sync.RWMutex
+	logRing     []LogItem
+	genProgress GenProgress
 )
 
 func addLog(level, msg string) {
@@ -148,8 +159,33 @@ func main() {
 		_ = json.NewEncoder(w).Encode(dict)
 	})
 
+	// API Progress of Generator
+	mux.HandleFunc("GET /api/accounts/generate/progress", func(w http.ResponseWriter, r *http.Request) {
+		genProgress.Lock()
+		defer genProgress.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"active":        genProgress.Active,
+			"total":         genProgress.Total,
+			"completed":     genProgress.Completed,
+			"current_email": genProgress.CurrentEmail,
+			"status":        genProgress.Status,
+		})
+	})
+
 	// API Generate Accounts
 	mux.HandleFunc("POST /api/accounts/generate", func(w http.ResponseWriter, r *http.Request) {
+		genProgress.Lock()
+		if genProgress.Active {
+			genProgress.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": i18n.T("en", "err_generation_in_progress"),
+			})
+			return
+		}
+
 		var req struct {
 			Count    int    `json:"count"`
 			Password string `json:"password"`
@@ -161,7 +197,20 @@ func main() {
 			req.Count = 1
 		}
 
+		genProgress.Active = true
+		genProgress.Total = req.Count
+		genProgress.Completed = 0
+		genProgress.Status = "generating"
+		genProgress.Unlock()
+
 		go func() {
+			defer func() {
+				genProgress.Lock()
+				genProgress.Active = false
+				genProgress.Status = "idle"
+				genProgress.Unlock()
+			}()
+
 			for i := 0; i < req.Count; i++ {
 				nextIdx := store.GetNextSequentialIndex(cfg.EmailPattern + "@" + cfg.EmailDomain)
 				email := fmt.Sprintf(cfg.EmailPattern+"@"+cfg.EmailDomain, nextIdx)
@@ -174,6 +223,11 @@ func main() {
 					}
 				}
 				name := mega.GenerateRandomName()
+
+				genProgress.Lock()
+				genProgress.Completed = i
+				genProgress.CurrentEmail = email
+				genProgress.Unlock()
 
 				addLog("info", i18n.T("en", "msg_account_registered", email))
 
@@ -196,6 +250,10 @@ func main() {
 				_ = store.SavePending(acc)
 				addLog("info", fmt.Sprintf("Awaiting Mailgun webhook for %s", email))
 
+				genProgress.Lock()
+				genProgress.Completed = i + 1
+				genProgress.Unlock()
+
 				// Brief pause between account creations
 				time.Sleep(1 * time.Second)
 			}
@@ -204,6 +262,155 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"status": "started",
+		})
+	})
+
+	// Export rclone.conf
+	mux.HandleFunc("GET /api/accounts/export.rclone.conf", func(w http.ResponseWriter, r *http.Request) {
+		unionName := r.URL.Query().Get("union_name")
+		createPolicy := r.URL.Query().Get("create_policy")
+		confContent := rclone.GenerateConfig(store.List(), unionName, createPolicy)
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=\"rclone.conf\"")
+		_, _ = w.Write([]byte(confContent))
+	})
+
+	// Fix Failed Accounts (re-test login to recover verified accounts)
+	mux.HandleFunc("POST /api/accounts/fix-failed", func(w http.ResponseWriter, r *http.Request) {
+		addLog("info", i18n.T("en", "msg_fixing_failed_started"))
+		accounts := store.List()
+		tested := 0
+		recovered := 0
+
+		for _, acc := range accounts {
+			if acc.Status != "failed" {
+				continue
+			}
+			tested++
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			err := megaClient.LoginCheck(ctx, acc.Email, acc.MegaPassword)
+			cancel()
+
+			if err == nil {
+				_ = store.FixAccount(acc.Email)
+				recovered++
+				addLog("success", i18n.T("en", "msg_account_fixed", acc.Email))
+			} else {
+				addLog("warning", i18n.T("en", "msg_account_still_failed", acc.Email, err.Error()))
+			}
+			time.Sleep(1 * time.Second)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"tested":    tested,
+			"recovered": recovered,
+		})
+	})
+
+	// Recheck / Fix individual account
+	mux.HandleFunc("POST /api/accounts/recheck", func(w http.ResponseWriter, r *http.Request) {
+		email := r.URL.Query().Get("email")
+		if email == "" {
+			var body struct {
+				Email string `json:"email"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			email = body.Email
+		}
+
+		acc, ok := store.Get(email)
+		if !ok {
+			http.Error(w, "Account not found", http.StatusNotFound)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		err := megaClient.LoginCheck(ctx, acc.Email, acc.MegaPassword)
+		cancel()
+
+		if err == nil {
+			_ = store.FixAccount(acc.Email)
+			addLog("success", i18n.T("en", "msg_account_fixed", acc.Email))
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":  "verified",
+				"message": "Account verified and recovered",
+			})
+		} else {
+			_ = store.MarkFailed(acc.Email, err.Error())
+			addLog("warning", i18n.T("en", "msg_account_still_failed", acc.Email, err.Error()))
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "failed",
+				"error":  err.Error(),
+			})
+		}
+	})
+
+	// Migration / Import accounts from other servers
+	mux.HandleFunc("POST /api/accounts/import", func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read body", http.StatusBadRequest)
+			return
+		}
+
+		raw := strings.TrimSpace(string(bodyBytes))
+		var accountsToImport []*storage.Account
+
+		if strings.HasPrefix(raw, "[") {
+			// Parse JSON
+			if err := json.Unmarshal(bodyBytes, &accountsToImport); err != nil {
+				http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		} else {
+			// Parse CSV
+			lines := strings.Split(raw, "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(strings.ToLower(line), "email") {
+					continue
+				}
+				parts := strings.Split(line, ",")
+				if len(parts) >= 2 {
+					acc := &storage.Account{
+						Email:        strings.Trim(strings.TrimSpace(parts[0]), "\""),
+						MegaPassword: strings.Trim(strings.TrimSpace(parts[1]), "\""),
+						Status:       "verified",
+						CreatedAt:    time.Now(),
+					}
+					if len(parts) > 2 {
+						acc.Usage = strings.Trim(strings.TrimSpace(parts[2]), "\"")
+					}
+					if len(parts) > 3 {
+						acc.MailtmPassword = strings.Trim(strings.TrimSpace(parts[3]), "\"")
+					}
+					if len(parts) > 4 {
+						acc.MailtmID = strings.Trim(strings.TrimSpace(parts[4]), "\"")
+					}
+					if len(parts) > 5 {
+						acc.Purpose = strings.Trim(strings.TrimSpace(parts[5]), "\"")
+					}
+					accountsToImport = append(accountsToImport, acc)
+				}
+			}
+		}
+
+		imported, skipped, err := store.ImportAccounts(accountsToImport)
+		if err != nil {
+			http.Error(w, "Import error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		addLog("info", i18n.T("en", "msg_migration_success", imported, skipped))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"imported": imported,
+			"skipped":  skipped,
+			"total":    len(accountsToImport),
 		})
 	})
 

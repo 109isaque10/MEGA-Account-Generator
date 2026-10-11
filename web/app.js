@@ -6,12 +6,13 @@ if (!['en', 'pt', 'es'].includes(currentLang)) {
 
 let dict = {};
 let accountsList = [];
+let isGenerating = false;
 
 // Dynamic string resolver - NO fixed strings
 function t(key, ...args) {
   let val = dict[key] || key;
   if (args.length > 0) {
-    args.forEach((arg, i) => {
+    args.forEach(arg => {
       val = val.replace('%s', arg).replace('%d', arg);
     });
   }
@@ -53,6 +54,11 @@ function applyTranslations() {
   const simulateTextarea = document.getElementById('simulatePayload');
   if (simulateTextarea && dict['lbl_webhook_body_placeholder']) {
     simulateTextarea.setAttribute('placeholder', dict['lbl_webhook_body_placeholder']);
+  }
+
+  const migrateTextarea = document.getElementById('textMigrateInput');
+  if (migrateTextarea && dict['lbl_migration_placeholder']) {
+    migrateTextarea.setAttribute('placeholder', dict['lbl_migration_placeholder']);
   }
 
   if (dict['app_title']) {
@@ -162,9 +168,16 @@ function renderAccountsTable() {
         </td>
         <td style="font-size: 0.78rem;">${formatDate(acc.created_at)}</td>
         <td>
-          <button class="btn btn-secondary btn-sm" onclick="copyCreds('${escapeHtml(acc.email)}', '${escapeHtml(acc.mega_password)}')">
-            ${t('btn_copy')}
-          </button>
+          <div style="display: flex; gap: 0.35rem;">
+            <button class="btn btn-secondary btn-sm" onclick="copyCreds('${escapeHtml(acc.email)}', '${escapeHtml(acc.mega_password)}')">
+              ${t('btn_copy')}
+            </button>
+            ${acc.status === 'failed' ? `
+              <button class="btn btn-secondary btn-sm" style="border-color: var(--accent-amber); color: var(--accent-amber);" onclick="recheckAccount('${escapeHtml(acc.email)}')">
+                ${t('btn_recheck')}
+              </button>
+            ` : ''}
+          </div>
         </td>
       </tr>
     `;
@@ -173,7 +186,27 @@ function renderAccountsTable() {
 
 function copyCreds(email, pass) {
   navigator.clipboard.writeText(`${email}:${pass}`);
-  alert(`${email} copied!`);
+  const btn = event.target;
+  const orig = btn.textContent;
+  btn.textContent = t('btn_copied');
+  setTimeout(() => { btn.textContent = orig; }, 1500);
+}
+
+async function recheckAccount(email) {
+  try {
+    const res = await fetch(`/api/accounts/recheck?email=${encodeURIComponent(email)}`, { method: 'POST' });
+    const data = await res.json();
+    if (res.ok && data.status === 'verified') {
+      await refreshAccounts();
+      await refreshStatus();
+      await refreshLogs();
+    } else {
+      alert(data.error || 'Recheck failed');
+      await refreshAccounts();
+    }
+  } catch (err) {
+    alert(err.message);
+  }
 }
 
 function escapeHtml(str) {
@@ -202,12 +235,59 @@ async function refreshLogs() {
   }
 }
 
+// Progress Polling for Generator
+async function pollGenProgress() {
+  try {
+    const res = await fetch('/api/accounts/generate/progress');
+    if (!res.ok) return;
+    const data = await res.json();
+    const btn = document.getElementById('btnSubmitGen');
+    const box = document.getElementById('genProgressBox');
+    const bar = document.getElementById('genProgressBar');
+    const txt = document.getElementById('genProgressText');
+    const pct = document.getElementById('genProgressPercent');
+
+    if (data.active) {
+      isGenerating = true;
+      btn.disabled = true;
+      btn.textContent = t('btn_generating');
+      box.style.display = 'block';
+
+      const current = Math.min(data.completed + 1, data.total || 1);
+      const percent = Math.min(Math.round(((data.completed) / (data.total || 1)) * 100), 100);
+      bar.style.width = `${percent}%`;
+      pct.textContent = `${percent}%`;
+      txt.textContent = t('lbl_generator_progress', current, data.total, data.current_email || '...');
+
+      setTimeout(pollGenProgress, 800);
+    } else {
+      if (isGenerating) {
+        isGenerating = false;
+        btn.disabled = false;
+        btn.textContent = t('btn_generate');
+        bar.style.width = '100%';
+        pct.textContent = '100%';
+        setTimeout(() => {
+          box.style.display = 'none';
+          bar.style.width = '0%';
+        }, 2000);
+        await refreshStatus();
+        await refreshAccounts();
+        await refreshLogs();
+      }
+    }
+  } catch (err) {
+    console.error('Progress poll error:', err);
+  }
+}
+
 // Event Listeners
 document.addEventListener('DOMContentLoaded', async () => {
   await loadLanguage(currentLang);
   await refreshStatus();
   await refreshAccounts();
   await refreshLogs();
+  pollGenProgress();
 
   // Language switch
   document.getElementById('langSelect').addEventListener('change', (e) => {
@@ -237,10 +317,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Generate form submit
   document.getElementById('genForm').addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (isGenerating) return;
+
     const count = parseInt(document.getElementById('inputCount').value, 10) || 1;
     const password = document.getElementById('inputPassword').value.trim();
     const btn = document.getElementById('btnSubmitGen');
-    const origText = btn.innerHTML;
     btn.disabled = true;
     btn.textContent = t('btn_generating');
 
@@ -253,16 +334,44 @@ document.addEventListener('DOMContentLoaded', async () => {
       const data = await res.json();
       if (!res.ok) {
         alert(data.error || 'Failed to start generation');
+        btn.disabled = false;
+        btn.textContent = t('btn_generate');
       } else {
-        await refreshStatus();
-        await refreshAccounts();
-        await refreshLogs();
+        pollGenProgress();
       }
+    } catch (err) {
+      alert(err.message);
+      btn.disabled = false;
+      btn.textContent = t('btn_generate');
+    }
+  });
+
+  // Download rclone.conf
+  document.getElementById('btnDownloadRclone').addEventListener('click', () => {
+    const unionName = encodeURIComponent(document.getElementById('rcloneUnionName').value.trim() || 'mega_union');
+    const policy = encodeURIComponent(document.getElementById('rclonePolicy').value || 'lus');
+    window.location.href = `/api/accounts/export.rclone.conf?union_name=${unionName}&create_policy=${policy}`;
+  });
+
+  // Fix Failed Accounts
+  document.getElementById('btnFixFailed').addEventListener('click', async () => {
+    const btn = document.getElementById('btnFixFailed');
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Fixing...';
+
+    try {
+      const res = await fetch('/api/accounts/fix-failed', { method: 'POST' });
+      const data = await res.json();
+      alert(`Tested ${data.tested || 0} failed accounts, recovered ${data.recovered || 0}!`);
+      await refreshAccounts();
+      await refreshStatus();
+      await refreshLogs();
     } catch (err) {
       alert(err.message);
     } finally {
       btn.disabled = false;
-      btn.innerHTML = origText;
+      btn.textContent = orig;
     }
   });
 
@@ -275,6 +384,61 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     } catch (err) {
       console.error(err);
+    }
+  });
+
+  // Migration modal handlers
+  const modal = document.getElementById('modalMigrate');
+  document.getElementById('btnOpenMigrate').addEventListener('click', () => {
+    modal.style.display = 'flex';
+  });
+  document.getElementById('btnCloseMigrate').addEventListener('click', () => {
+    modal.style.display = 'none';
+  });
+  document.getElementById('btnCancelMigrate').addEventListener('click', () => {
+    modal.style.display = 'none';
+  });
+
+  // File upload reader for migration
+  document.getElementById('fileMigrateInput').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      document.getElementById('textMigrateInput').value = event.target.result;
+    };
+    reader.readAsText(file);
+  });
+
+  // Submit Migration
+  document.getElementById('btnSubmitMigrate').addEventListener('click', async () => {
+    const text = document.getElementById('textMigrateInput').value.trim();
+    if (!text) return;
+    const submitBtn = document.getElementById('btnSubmitMigrate');
+    submitBtn.disabled = true;
+
+    try {
+      const res = await fetch('/api/accounts/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: text
+      });
+      const data = await res.json();
+      if (res.ok) {
+        alert(t('msg_migration_success', data.imported || 0, data.skipped || 0));
+        modal.style.display = 'none';
+        document.getElementById('textMigrateInput').value = '';
+        document.getElementById('fileMigrateInput').value = '';
+        await refreshAccounts();
+        await refreshStatus();
+        await refreshLogs();
+      } else {
+        alert(data.error || 'Import failed');
+      }
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      submitBtn.disabled = false;
     }
   });
 
@@ -311,5 +475,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     refreshStatus();
     refreshAccounts();
     refreshLogs();
+    if (isGenerating) pollGenProgress();
   }, 5000);
 });

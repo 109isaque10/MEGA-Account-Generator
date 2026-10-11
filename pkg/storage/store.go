@@ -325,3 +325,127 @@ func (s *Store) GetNextSequentialIndex(pattern string) int {
 	}
 	return maxIndex + 1
 }
+
+// RewriteCSV updates accounts.csv with all currently verified accounts
+func (s *Store) RewriteCSV() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	file, err := os.OpenFile(s.csvPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	w := csv.NewWriter(file)
+	if err := w.Write([]string{"Email", "MEGA Password", "Usage", "Mail.tm Password", "Mail.tm ID", "Purpose"}); err != nil {
+		return err
+	}
+
+	for _, acc := range s.accounts {
+		if acc.Status == "verified" {
+			_ = w.Write([]string{
+				acc.Email,
+				acc.MegaPassword,
+				acc.Usage,
+				acc.MailtmPassword,
+				acc.MailtmID,
+				acc.Purpose,
+			})
+		}
+	}
+	w.Flush()
+	return w.Error()
+}
+
+// FixAccount restores an account to verified status, clearing error and updating persistence
+func (s *Store) FixAccount(email string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	acc, exists := s.accounts[email]
+	if !exists {
+		return fmt.Errorf("account %s not found", email)
+	}
+
+	acc.Status = "verified"
+	acc.ErrorMessage = ""
+	acc.VerifyCommand = ""
+	_ = s.saveToJSON()
+
+	// Append to CSV if not already present
+	return s.appendToCSV(acc)
+}
+
+// ImportAccounts merges accounts from external JSON or CSV migration
+func (s *Store) ImportAccounts(list []*Account) (imported int, skipped int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, acc := range list {
+		if acc == nil || acc.Email == "" {
+			skipped++
+			continue
+		}
+
+		existing, exists := s.accounts[acc.Email]
+		if !exists {
+			if acc.Status == "" {
+				acc.Status = "verified"
+			}
+			if acc.CreatedAt.IsZero() {
+				acc.CreatedAt = time.Now()
+			}
+			if acc.Usage == "" {
+				acc.Usage = "-"
+			}
+			if acc.MailtmPassword == "" {
+				acc.MailtmPassword = "-"
+			}
+			if acc.MailtmID == "" {
+				acc.MailtmID = "-"
+			}
+			if acc.Purpose == "" {
+				acc.Purpose = "-"
+			}
+			s.accounts[acc.Email] = acc
+			imported++
+		} else {
+			// If already exists but was marked failed while import says verified, restore it
+			if existing.Status == "failed" && acc.Status == "verified" {
+				existing.Status = "verified"
+				existing.ErrorMessage = ""
+				existing.VerifyCommand = ""
+				imported++
+			} else {
+				skipped++
+			}
+		}
+	}
+
+	_ = s.saveToJSON()
+	
+	// Rewrite CSV to include all verified accounts
+	file, err := os.OpenFile(s.csvPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err == nil {
+		defer file.Close()
+		w := csv.NewWriter(file)
+		_ = w.Write([]string{"Email", "MEGA Password", "Usage", "Mail.tm Password", "Mail.tm ID", "Purpose"})
+		for _, acc := range s.accounts {
+			if acc.Status == "verified" {
+				_ = w.Write([]string{
+					acc.Email,
+					acc.MegaPassword,
+					acc.Usage,
+					acc.MailtmPassword,
+					acc.MailtmID,
+					acc.Purpose,
+				})
+			}
+		}
+		w.Flush()
+	}
+
+	return imported, skipped, nil
+}
+
