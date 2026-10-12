@@ -1,13 +1,9 @@
 package mega
 
 import (
-	"bytes"
-	"fmt"
 	"log"
-	"os/exec"
-	"path/filepath"
-	"strings"
 
+	gomega "github.com/t3rm1n4l/go-mega"
 	"github.com/109isaque10/mega-account-generator/pkg/storage"
 )
 
@@ -25,11 +21,10 @@ type AccountIndex struct {
 	Tree     *FileNode `json:"tree"`
 }
 
-// CrawlAllAccounts generates a unified file tree for all verified accounts with progress callbacks
+// CrawlAllAccounts generates a unified file tree for all verified accounts using go-mega
 func CrawlAllAccounts(accounts []*storage.Account, megatoolsPath string, onProgress func(completed, total int, currentEmail string)) ([]*AccountIndex, error) {
 	var indices []*AccountIndex
 
-	// Count verified accounts for accurate total
 	var verified []*storage.Account
 	for _, acc := range accounts {
 		if acc.Status == "verified" {
@@ -45,34 +40,14 @@ func CrawlAllAccounts(accounts []*storage.Account, megatoolsPath string, onProgr
 
 		accNode := &FileNode{Name: "/", Path: "/", IsDir: true, Children: []*FileNode{}}
 
-		// Run: megatools ls --reload -l -R -u <email> -p <password> --no-ask-password
-		cmd := exec.Command(megatoolsPath, "ls", "--reload", "-l", "-R", "-u", acc.Email, "-p", acc.MegaPassword, "--no-ask-password")
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		err := cmd.Run()
-
+		m := gomega.New()
+		err := m.Login(acc.Email, acc.MegaPassword)
 		if err != nil {
-			errStr := strings.TrimSpace(stderr.String())
-			log.Printf("[CRAWLER] Account %s listing notice: %v (details: %s)", acc.Email, err, errStr)
-			// Fallback: try plain recursive ls without -l
-			cmdFallback := exec.Command(megatoolsPath, "ls", "-R", "--reload", "-u", acc.Email, "-p", acc.MegaPassword, "--no-ask-password")
-			var fbStdout, fbStderr bytes.Buffer
-			cmdFallback.Stdout = &fbStdout
-			cmdFallback.Stderr = &fbStderr
-			if fbErr := cmdFallback.Run(); fbErr == nil && fbStdout.Len() > 0 {
-				stdout = fbStdout
-				err = nil
-			}
-		}
-
-		if stdout.Len() > 0 {
-			lines := strings.Split(stdout.String(), "\n")
-			for _, line := range lines {
-				isDir, size, path, ok := parseMegatoolsLine(line)
-				if ok && path != "" {
-					addToTree(accNode, path, size, isDir)
-				}
+			log.Printf("[CRAWLER] go-mega login failed for %s: %v", acc.Email, err)
+		} else {
+			rootNode := m.FS.GetRoot()
+			if rootNode != nil {
+				crawlGoMegaNode(m, rootNode, "/Root", accNode)
 			}
 		}
 
@@ -90,106 +65,31 @@ func CrawlAllAccounts(accounts []*storage.Account, megatoolsPath string, onProgr
 	return indices, nil
 }
 
-func parseMegatoolsLine(line string) (isDir bool, size int64, path string, ok bool) {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return false, 0, "", false
-	}
-
-	// 1. Plain megatools ls output without -l (e.g. /Root/file.mp4 or /Root/Folder)
-	if strings.HasPrefix(line, "/") {
-		if !strings.HasPrefix(line, "/Root") {
-			return false, 0, "", false
-		}
-		// Heuristic: consider it a file if it has a file extension dot in the base name
-		isDir = !strings.Contains(filepath.Base(line), ".")
-		return isDir, 0, line, true
-	}
-
-	// 2. megatools 1.11+ long listing (-l) format:
-	// Format: [Handle] [Type] [Size] [Date] [Time] [Path]
-	// Example file:   AbCdEfGh 0 12345678 2026-10-11 13:21:33 /Root/Folder/video.mp4
-	// Example folder: IjKlMnOp 1 -        2026-10-11 13:21:33 /Root/Folder
-	// Example root:   WxYSmRhb 2 -        2026-10-11 13:21:33 /Root
-	parts := strings.Fields(line)
-	if len(parts) >= 3 {
-		pathIdx := -1
-		for i, p := range parts {
-			if strings.HasPrefix(p, "/") {
-				pathIdx = i
-				break
-			}
-		}
-
-		if pathIdx != -1 {
-			idx := strings.Index(line, parts[pathIdx])
-			fullPath := strings.TrimSpace(line[idx:])
-
-			// Only index items under /Root
-			if !strings.HasPrefix(fullPath, "/Root") {
-				return false, 0, "", false
-			}
-
-			// parts[1] is node type: 0 = file, 1 = folder, 2 = root
-			typeStr := parts[1]
-			isDir = (typeStr != "0")
-
-			// parts[2] is size (or "-" for directories)
-			if !isDir && parts[2] != "-" {
-				var s int64
-				_, _ = fmt.Sscanf(parts[2], "%d", &s)
-				size = s
-			}
-
-			return isDir, size, fullPath, true
-		}
-	}
-
-	return false, 0, "", false
-}
-
-func addToTree(root *FileNode, fullPath string, size int64, isDir bool) {
-	// Strip leading /Root or / so files live directly at root / (matching rclone behavior)
-	clean := strings.TrimPrefix(fullPath, "/Root")
-	clean = strings.Trim(clean, "/")
-	if clean == "" {
+func crawlGoMegaNode(m *gomega.Mega, currNode *gomega.Node, currentPath string, parentFileNode *FileNode) {
+	children, err := m.FS.GetChildren(currNode)
+	if err != nil {
 		return
 	}
-	parts := strings.Split(clean, "/")
-	curr := root
-	runningPath := ""
-	for i, part := range parts {
-		isLeaf := (i == len(parts)-1)
-		runningPath += "/" + part
-		found := false
-		for _, child := range curr.Children {
-			if child.Name == part {
-				curr = child
-				found = true
-				if isLeaf {
-					curr.IsDir = isDir
-					curr.Size = size
-					curr.Path = runningPath
-				}
-				break
-			}
+
+	for _, ch := range children {
+		name := ch.GetName()
+		nodeType := ch.GetType() // 0 = file, 1 = folder
+		isDir := (nodeType == gomega.FOLDER)
+		size := ch.GetSize()
+		childPath := currentPath + "/" + name
+
+		newNode := &FileNode{
+			Name:     name,
+			Path:     childPath,
+			IsDir:    isDir,
+			Size:     size,
+			Children: []*FileNode{},
 		}
-		if !found {
-			nodeIsDir := true
-			var nodeSize int64
-			if isLeaf {
-				nodeIsDir = isDir
-				nodeSize = size
-			}
-			newNode := &FileNode{
-				Name:     part,
-				Path:     runningPath,
-				IsDir:    nodeIsDir,
-				Size:     nodeSize,
-				Children: []*FileNode{},
-			}
-			curr.Children = append(curr.Children, newNode)
-			curr = newNode
+
+		parentFileNode.Children = append(parentFileNode.Children, newNode)
+
+		if isDir {
+			crawlGoMegaNode(m, ch, childPath, newNode)
 		}
 	}
 }
