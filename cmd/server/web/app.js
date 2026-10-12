@@ -358,12 +358,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     const btn = document.getElementById('btnFixFailed');
     const orig = btn.textContent;
     btn.disabled = true;
-    btn.textContent = 'Fixing...';
+    btn.textContent = t('btn_recheck');
 
     try {
       const res = await fetch('/api/accounts/fix-failed', { method: 'POST' });
       const data = await res.json();
-      alert(`Tested ${data.tested || 0} failed accounts, recovered ${data.recovered || 0}!`);
+      alert(t('msg_migration_success', data.recovered || 0, (data.tested || 0) - (data.recovered || 0)));
       await refreshAccounts();
       await refreshStatus();
       await refreshLogs();
@@ -379,19 +379,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btnSyncIndex').addEventListener('click', async () => {
     const btn = document.getElementById('btnSyncIndex');
     btn.disabled = true;
-    btn.textContent = 'Syncing...';
+    btn.textContent = t('btn_syncing');
     try {
       const res = await fetch('/api/accounts/sync-index', { method: 'POST' });
       if (res.ok) {
-        alert('File index sync triggered successfully.');
+        alert(t('msg_sync_started'));
+        await refreshLogs();
       } else {
-        alert('Failed to trigger index sync');
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || 'Failed to trigger index sync');
       }
     } catch (err) {
       alert(err.message);
     } finally {
       btn.disabled = false;
-      btn.textContent = 'Sync File Index';
+      btn.textContent = t('btn_sync_index');
     }
   });
 

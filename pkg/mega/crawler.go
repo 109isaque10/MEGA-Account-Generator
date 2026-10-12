@@ -15,38 +15,51 @@ type FileNode struct {
 	Children []*FileNode `json:"children,omitempty"`
 }
 
+type AccountIndex struct {
+	Email    string    `json:"email"`
+	Password string    `json:"password"`
+	Tree     *FileNode `json:"tree"`
+}
+
 // CrawlAllAccounts generates a unified file tree for all verified accounts
-func CrawlAllAccounts(accounts []*storage.Account, megatoolsPath string) (*FileNode, error) {
-	root := &FileNode{Name: "root", IsDir: true, Children: []*FileNode{}}
+func CrawlAllAccounts(accounts []*storage.Account, megatoolsPath string) ([]*AccountIndex, error) {
+	var indices []*AccountIndex
 
 	for _, acc := range accounts {
 		if acc.Status != "verified" {
 			continue
 		}
 
-		accNode := &FileNode{Name: acc.Email, IsDir: true, Children: []*FileNode{}}
-		
-		// Run: megatools ls -R /
-		cmd := exec.Command(megatoolsPath, "--username", acc.Email, "--password", acc.MegaPassword, "ls", "-R", "/")
+		accNode := &FileNode{Name: "Root", Path: "/Root", IsDir: true, Children: []*FileNode{}}
+
+		// Run: megatools ls -l -R -u <email> -p <password>
+		cmd := exec.Command(megatoolsPath, "ls", "-l", "-R", "-u", acc.Email, "-p", acc.MegaPassword)
 		out, err := cmd.Output()
-		if err != nil {
-			continue // Skip accounts that fail to list
+		if err == nil && len(out) > 0 {
+			lines := strings.Split(string(out), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				parts := strings.Fields(line)
+				if len(parts) >= 1 {
+					path := parts[len(parts)-1]
+					if strings.HasPrefix(path, "/") {
+						addToTree(accNode, path)
+					}
+				}
+			}
 		}
 
-		lines := strings.Split(string(out), "\n")
-		for _, line := range lines {
-			if strings.TrimSpace(line) == "" { continue }
-			// Simplified parsing: expecting "path size"
-			parts := strings.Fields(line)
-			if len(parts) < 2 { continue }
-			path := parts[0]
-			// Recursive logic to build tree...
-			addToTree(accNode, path)
-		}
-		root.Children = append(root.Children, accNode)
+		indices = append(indices, &AccountIndex{
+			Email:    acc.Email,
+			Password: acc.MegaPassword,
+			Tree:     accNode,
+		})
 	}
 
-	return root, nil
+	return indices, nil
 }
 
 func addToTree(root *FileNode, path string) {
