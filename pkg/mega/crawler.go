@@ -45,8 +45,8 @@ func CrawlAllAccounts(accounts []*storage.Account, megatoolsPath string, onProgr
 
 		accNode := &FileNode{Name: "/", Path: "/", IsDir: true, Children: []*FileNode{}}
 
-		// Run: megatools ls -l -R -u <email> -p <password> --no-ask-password /Root
-		cmd := exec.Command(megatoolsPath, "ls", "-l", "-R", "-u", acc.Email, "-p", acc.MegaPassword, "--no-ask-password", "/Root")
+		// Run: megatools ls --reload -l -R -u <email> -p <password> --no-ask-password
+		cmd := exec.Command(megatoolsPath, "ls", "--reload", "-l", "-R", "-u", acc.Email, "-p", acc.MegaPassword, "--no-ask-password")
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
@@ -55,8 +55,8 @@ func CrawlAllAccounts(accounts []*storage.Account, megatoolsPath string, onProgr
 		if err != nil {
 			errStr := strings.TrimSpace(stderr.String())
 			log.Printf("[CRAWLER] Account %s listing notice: %v (details: %s)", acc.Email, err, errStr)
-			// If listing with /Root fails or returns non-zero, retry with basic ls without /Root
-			cmdFallback := exec.Command(megatoolsPath, "ls", "-l", "-R", "-u", acc.Email, "-p", acc.MegaPassword, "--no-ask-password")
+			// Fallback: try plain recursive ls without -l
+			cmdFallback := exec.Command(megatoolsPath, "ls", "-R", "--reload", "-u", acc.Email, "-p", acc.MegaPassword, "--no-ask-password")
 			var fbStdout, fbStderr bytes.Buffer
 			cmdFallback.Stdout = &fbStdout
 			cmdFallback.Stderr = &fbStderr
@@ -95,25 +95,56 @@ func parseMegatoolsLine(line string) (isDir bool, size int64, path string, ok bo
 	if line == "" {
 		return false, 0, "", false
 	}
-	parts := strings.Fields(line)
-	if len(parts) >= 5 && (parts[0] == "d" || parts[0] == "-") {
-		isDir = (parts[0] == "d")
-		var s int64
-		_, _ = fmt.Sscanf(parts[1], "%d", &s)
-		size = s
-		// The path is after parts[3] (time field). Everything after is the path (supports spaces).
-		idx := strings.Index(line, parts[3])
-		if idx != -1 {
-			path = strings.TrimSpace(line[idx+len(parts[3]):])
-		} else {
-			path = strings.Join(parts[4:], " ")
+
+	// 1. Plain megatools ls output without -l (e.g. /Root/file.mp4 or /Root/Folder)
+	if strings.HasPrefix(line, "/") {
+		if !strings.HasPrefix(line, "/Root") {
+			return false, 0, "", false
 		}
-		return isDir, size, path, true
-	} else if strings.HasPrefix(line, "/") {
-		// Plain megatools ls output without -l
+		// Heuristic: consider it a file if it has a file extension dot in the base name
 		isDir = !strings.Contains(filepath.Base(line), ".")
 		return isDir, 0, line, true
 	}
+
+	// 2. megatools 1.11+ long listing (-l) format:
+	// Format: [Handle] [Type] [Size] [Date] [Time] [Path]
+	// Example file:   AbCdEfGh 0 12345678 2026-10-11 13:21:33 /Root/Folder/video.mp4
+	// Example folder: IjKlMnOp 1 -        2026-10-11 13:21:33 /Root/Folder
+	// Example root:   WxYSmRhb 2 -        2026-10-11 13:21:33 /Root
+	parts := strings.Fields(line)
+	if len(parts) >= 3 {
+		pathIdx := -1
+		for i, p := range parts {
+			if strings.HasPrefix(p, "/") {
+				pathIdx = i
+				break
+			}
+		}
+
+		if pathIdx != -1 {
+			idx := strings.Index(line, parts[pathIdx])
+			fullPath := strings.TrimSpace(line[idx:])
+
+			// Only index items under /Root
+			if !strings.HasPrefix(fullPath, "/Root") {
+				return false, 0, "", false
+			}
+
+			// parts[1] is node type: 0 = file, 1 = folder, 2 = root
+			typeStr := parts[1]
+			isDir = (typeStr != "0")
+
+			// parts[2] is size (or "-" for directories)
+			if !isDir && parts[2] != "-" {
+				var s int64
+				_, _ = fmt.Sscanf(parts[2], "%d", &s)
+				size = s
+			}
+
+			return isDir, size, fullPath, true
+		}
+	}
+
 	return false, 0, "", false
 }
 
