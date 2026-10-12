@@ -31,6 +31,8 @@ var (
 			"btn_export_csv":               "Export CSV",
 			"btn_export_json":              "Export JSON",
 			"btn_export_rclone":            "Export rclone.conf",
+			"btn_export_worker":            "Export Cloudflare Worker",
+			"btn_export_html":              "Export Standalone HTML",
 			"btn_fix_failed":               "Fix Failed Accounts",
 			"btn_migrate":                  "Migrate / Import",
 			"btn_simulate_webhook":         "Simulate Mailgun Webhook",

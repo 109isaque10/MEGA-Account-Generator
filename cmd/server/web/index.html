@@ -114,7 +114,11 @@
                 <option value="rand">rand (random)</option>
               </select>
             </div>
-            <button id="btnDownloadRclone" class="btn btn-secondary btn-sm" style="margin-top: 0.5rem;" data-i18n="btn_export_rclone"></button>
+            <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap;">
+              <button id="btnDownloadRclone" class="btn btn-secondary btn-sm" data-i18n="btn_export_rclone"></button>
+              <a href="/api/accounts/export.worker.js" class="btn btn-secondary btn-sm" data-i18n="btn_export_worker" download></a>
+              <a href="/api/accounts/export.html" class="btn btn-secondary btn-sm" data-i18n="btn_export_html" download></a>
+            </div>
           </div>
         </div>
 

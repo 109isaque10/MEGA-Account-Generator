@@ -23,6 +23,7 @@ import (
 	"github.com/109isaque10/mega-account-generator/pkg/rclone"
 	"github.com/109isaque10/mega-account-generator/pkg/scheduler"
 	"github.com/109isaque10/mega-account-generator/pkg/storage"
+	"github.com/109isaque10/mega-account-generator/pkg/worker"
 )
 
 //go:embed web/*
@@ -274,6 +275,24 @@ func main() {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Content-Disposition", "attachment; filename=\"rclone.conf\"")
 		_, _ = w.Write([]byte(confContent))
+	})
+
+	// Export Cloudflare Worker Script
+	mux.HandleFunc("GET /api/accounts/export.worker.js", func(w http.ResponseWriter, r *http.Request) {
+		scriptContent := worker.GenerateCloudflareWorker(store.List())
+
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=\"worker.js\"")
+		_, _ = w.Write([]byte(scriptContent))
+	})
+
+	// Export Standalone HTML Index
+	mux.HandleFunc("GET /api/accounts/export.html", func(w http.ResponseWriter, r *http.Request) {
+		htmlContent := worker.GenerateStandaloneHTML(store.List())
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=\"accounts.html\"")
+		_, _ = w.Write([]byte(htmlContent))
 	})
 
 	// Fix Failed Accounts (re-test login to recover verified accounts)
