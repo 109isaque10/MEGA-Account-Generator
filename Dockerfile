@@ -1,6 +1,6 @@
 # Multi-stage build supporting linux/amd64 and linux/arm64
 # Stage 1: Build static Go server
-FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
