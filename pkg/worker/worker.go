@@ -107,8 +107,17 @@ func mergeNodeIntoUnion(targetList []*UnionItem, item *UnionItem) []*UnionItem {
 	return append(targetList, item)
 }
 
-// GenerateCloudflareWorker generates the complete Cloudflare Worker JavaScript script
-func GenerateCloudflareWorker(accounts []*storage.Account) string {
+// WorkerFile represents a single file of the generated Cloudflare Worker bundle.
+type WorkerFile struct {
+	Name    string
+	Content string
+}
+
+// GenerateCloudflareWorker generates the Cloudflare Worker as a multi-file bundle:
+// worker.js (request handling/UI), wrangler.jsonc (deploy config) and
+// public/union-tree.json (the union index, deployed as a static asset so it
+// does not count towards the 64 MiB Worker bundle limit).
+func GenerateCloudflareWorker(accounts []*storage.Account) []WorkerFile {
 	var workerAccounts []WorkerAccount
 	accountMap := make(map[string]string) // email -> mega_X
 	idx := 1
@@ -172,19 +181,73 @@ func GenerateCloudflareWorker(accounts []*storage.Account) string {
 		unionTree = make([]*UnionItem, 0)
 	}
 
-	unionJSON, _ := json.MarshalIndent(unionTree, "", "  ")
+	// The union tree is deployed as a static asset, so keep the JSON compact
+	// (no indentation) to stay below the 25 MiB per-asset limit for as long
+	// as possible.
+	unionJSON, _ := json.Marshal(unionTree)
 
-	return buildWorkerJS(string(accountsJSON), string(unionJSON))
+	return []WorkerFile{
+		{Name: "worker.js", Content: buildWorkerJS(string(accountsJSON))},
+		{Name: "wrangler.jsonc", Content: buildWranglerConfig()},
+		{Name: "public/union-tree.json", Content: string(unionJSON) + "\n"},
+	}
 }
 
-func buildWorkerJS(accountsJSON, unionJSON string) string {
+func buildWranglerConfig() string {
+	return `{
+  // MEGA.nz Cloudflare Worker - Union & Public Shared Link Indexer
+  // Deploy with: npx wrangler deploy
+  //
+  // The union file index lives in public/union-tree.json and is deployed as a
+  // static asset, so it does NOT count towards the 64 MiB Worker bundle limit
+  // (individual asset files may be up to 25 MiB each).
+  //
+  // "run_worker_first": true ensures all requests hit worker.js first, so the
+  // raw index is only served through the worker's own routes (/, /u/*, ...)
+  // and is not publicly downloadable at /union-tree.json.
+  "name": "mega-union-indexer",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-12",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  }
+}
+`
+}
+
+func buildWorkerJS(accountsJSON string) string {
 	return `// MEGA.nz Cloudflare Worker - Union & Public Shared Link Indexer
 // Aggregates all private accounts into a unified file system (rclone union style)
 // and supports streaming downloads + public link browsing.
+//
+// Deploy:
+//   1. Unzip this bundle (worker.js + wrangler.jsonc + public/union-tree.json)
+//   2. Run: npx wrangler deploy
+//
+// The union file index (public/union-tree.json) is deployed as a static asset
+// and loaded through the ASSETS binding, bypassing the Worker bundle size limit.
 
 const ACCOUNTS = ` + accountsJSON + `;
-const UNION_TREE = ` + unionJSON + `;
 const publicTreeCache = {};
+
+// The union file tree lives in public/union-tree.json (a Workers static asset)
+// and is loaded lazily through the ASSETS binding. It is cached at module scope
+// per isolate, so the JSON is only fetched and parsed once per worker instance.
+let unionTreeCache = null;
+async function getUnionTree(env, origin) {
+  if (unionTreeCache) return unionTreeCache;
+  if (!env || !env.ASSETS) {
+    throw new Error("ASSETS binding unavailable. Deploy with 'npx wrangler deploy' (see wrangler.jsonc) so public/union-tree.json is uploaded as a static asset.");
+  }
+  const res = await env.ASSETS.fetch(new URL("/union-tree.json", origin));
+  if (!res.ok) {
+    throw new Error("Failed to load union-tree.json asset (HTTP " + res.status + ")");
+  }
+  unionTreeCache = await res.json();
+  return unionTreeCache;
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -194,12 +257,14 @@ export default {
       // 1. Root / Union file tree index
       if (url.pathname === "/" || url.pathname === "/union" || url.pathname.startsWith("/u/")) {
         const subPath = url.pathname.startsWith("/u/") ? decodeURIComponent(url.pathname.substring(3)) : "";
-        return renderUnionUI(UNION_TREE, subPath, url.origin);
+        const unionTree = await getUnionTree(env, url.origin);
+        return renderUnionUI(unionTree, subPath, url.origin);
       }
 
       // 2. Union raw JSON index endpoint
       if (url.pathname === "/api/union.json") {
-        return new Response(JSON.stringify(UNION_TREE, null, 2), {
+        const unionTree = await getUnionTree(env, url.origin);
+        return new Response(JSON.stringify(unionTree, null, 2), {
           headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
         });
       }

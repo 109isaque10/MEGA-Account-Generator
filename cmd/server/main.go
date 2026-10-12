@@ -1,6 +1,8 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
@@ -289,13 +291,29 @@ func main() {
 		_, _ = w.Write([]byte(confContent))
 	})
 
-	// Export Cloudflare Worker Script
-	mux.HandleFunc("GET /api/accounts/export.worker.js", func(w http.ResponseWriter, r *http.Request) {
-		scriptContent := worker.GenerateCloudflareWorker(store.List())
+	// Export Cloudflare Worker bundle (worker.js + wrangler.jsonc + union-tree.json static asset)
+	mux.HandleFunc("GET /api/accounts/export.worker.zip", func(w http.ResponseWriter, r *http.Request) {
+		buf := new(bytes.Buffer)
+		zw := zip.NewWriter(buf)
+		for _, f := range worker.GenerateCloudflareWorker(store.List()) {
+			fw, err := zw.Create(f.Name)
+			if err != nil {
+				http.Error(w, "failed to create zip entry: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if _, err := fw.Write([]byte(f.Content)); err != nil {
+				http.Error(w, "failed to write zip entry: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		if err := zw.Close(); err != nil {
+			http.Error(w, "failed to finalize zip: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 
-		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		w.Header().Set("Content-Disposition", "attachment; filename=\"worker.js\"")
-		_, _ = w.Write([]byte(scriptContent))
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", "attachment; filename=\"mega-worker.zip\"")
+		_, _ = w.Write(buf.Bytes())
 	})
 
 	// Export Standalone HTML Index
@@ -364,10 +382,10 @@ func main() {
 				syncProgress.Status = "error"
 				syncProgress.Message = err.Error()
 				syncProgress.Unlock()
-				addLog("error", "Index sync failed: " + err.Error())
+				addLog("error", "Index sync failed: "+err.Error())
 				return
 			}
-			
+
 			// Save index.json to DATA_DIR and data/index.json
 			data, _ := json.MarshalIndent(indices, "", "  ")
 			targetPath := "data/index.json"
