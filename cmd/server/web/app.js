@@ -375,6 +375,26 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  // Sync File Index
+  document.getElementById('btnSyncIndex').addEventListener('click', async () => {
+    const btn = document.getElementById('btnSyncIndex');
+    btn.disabled = true;
+    btn.textContent = 'Syncing...';
+    try {
+      const res = await fetch('/api/accounts/sync-index', { method: 'POST' });
+      if (res.ok) {
+        alert('File index sync triggered successfully.');
+      } else {
+        alert('Failed to trigger index sync');
+      }
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Sync File Index';
+    }
+  });
+
   // Keep-Alive trigger
   document.getElementById('btnKeepAliveNow').addEventListener('click', async () => {
     try {
