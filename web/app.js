@@ -375,23 +375,98 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Sync File Index
+  // Sync File Index with Progress Popup
+  const syncModal = document.getElementById('modalSyncProgress');
+  const syncEmailEl = document.getElementById('syncProgressEmail');
+  const syncPercentEl = document.getElementById('syncProgressPercent');
+  const syncBarEl = document.getElementById('syncProgressBar');
+  const syncCountEl = document.getElementById('syncProgressCount');
+  const syncStatusEl = document.getElementById('syncProgressStatus');
+  const btnCloseSyncModal = document.getElementById('btnCloseSyncModal');
+  const btnDismissSyncModal = document.getElementById('btnDismissSyncModal');
+
+  function closeSyncModal() {
+    if (syncModal) syncModal.style.display = 'none';
+  }
+  if (btnCloseSyncModal) btnCloseSyncModal.addEventListener('click', closeSyncModal);
+  if (btnDismissSyncModal) btnDismissSyncModal.addEventListener('click', closeSyncModal);
+
   document.getElementById('btnSyncIndex').addEventListener('click', async () => {
     const btn = document.getElementById('btnSyncIndex');
     btn.disabled = true;
     btn.textContent = t('btn_syncing');
+
+    // Reset and display modal
+    if (syncModal) syncModal.style.display = 'flex';
+    if (syncBarEl) syncBarEl.style.width = '0%';
+    if (syncPercentEl) syncPercentEl.textContent = '0%';
+    if (syncEmailEl) syncEmailEl.textContent = t('btn_syncing');
+    if (syncCountEl) syncCountEl.textContent = '0 / 0';
+    if (syncStatusEl) syncStatusEl.textContent = t('btn_syncing');
+    if (btnCloseSyncModal) btnCloseSyncModal.style.display = 'none';
+    if (btnDismissSyncModal) btnDismissSyncModal.style.display = 'none';
+
     try {
       const res = await fetch('/api/accounts/sync-index', { method: 'POST' });
-      if (res.ok) {
-        alert(t('msg_sync_started'));
-        await refreshLogs();
-      } else {
+      if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        alert(data.error || 'Failed to trigger index sync');
+        if (syncStatusEl) syncStatusEl.textContent = data.error || 'Error';
+        if (btnCloseSyncModal) btnCloseSyncModal.style.display = 'block';
+        if (btnDismissSyncModal) btnDismissSyncModal.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = t('btn_sync_index');
+        return;
       }
+
+      // Poll progress every 750ms
+      const pollTimer = setInterval(async () => {
+        try {
+          const pRes = await fetch('/api/accounts/sync-progress');
+          if (!pRes.ok) return;
+          const prog = await pRes.json();
+
+          const total = prog.total || 0;
+          const completed = prog.completed || 0;
+          const pct = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+
+          if (syncBarEl) syncBarEl.style.width = `${pct}%`;
+          if (syncPercentEl) syncPercentEl.textContent = `${pct}%`;
+          if (syncCountEl) syncCountEl.textContent = `${completed} / ${total}`;
+
+          if (prog.current_email && syncEmailEl) {
+            syncEmailEl.textContent = prog.current_email;
+          }
+
+          if (prog.status === 'syncing') {
+            if (syncStatusEl) syncStatusEl.textContent = `${pct}%`;
+          } else if (prog.status === 'done') {
+            clearInterval(pollTimer);
+            if (syncBarEl) syncBarEl.style.width = '100%';
+            if (syncPercentEl) syncPercentEl.textContent = '100%';
+            if (syncEmailEl) syncEmailEl.textContent = t('lbl_sync_completed');
+            if (syncStatusEl) syncStatusEl.textContent = '';
+            if (btnCloseSyncModal) btnCloseSyncModal.style.display = 'block';
+            if (btnDismissSyncModal) btnDismissSyncModal.style.display = 'block';
+            btn.disabled = false;
+            btn.textContent = t('btn_sync_index');
+            await refreshLogs();
+          } else if (prog.status === 'error') {
+            clearInterval(pollTimer);
+            if (syncStatusEl) syncStatusEl.textContent = prog.message || 'Error';
+            if (btnCloseSyncModal) btnCloseSyncModal.style.display = 'block';
+            if (btnDismissSyncModal) btnDismissSyncModal.style.display = 'block';
+            btn.disabled = false;
+            btn.textContent = t('btn_sync_index');
+            await refreshLogs();
+          }
+        } catch (err) {
+          console.error(err);
+        }
+      }, 750);
     } catch (err) {
-      alert(err.message);
-    } finally {
+      if (syncStatusEl) syncStatusEl.textContent = err.message;
+      if (btnCloseSyncModal) btnCloseSyncModal.style.display = 'block';
+      if (btnDismissSyncModal) btnDismissSyncModal.style.display = 'block';
       btn.disabled = false;
       btn.textContent = t('btn_sync_index');
     }

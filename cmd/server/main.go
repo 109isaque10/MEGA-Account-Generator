@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -44,10 +45,21 @@ type GenProgress struct {
 	Status       string `json:"status"` // "idle", "generating", "done"
 }
 
+type SyncProgress struct {
+	sync.Mutex
+	Active       bool   `json:"active"`
+	Total        int    `json:"total"`
+	Completed    int    `json:"completed"`
+	CurrentEmail string `json:"current_email"`
+	Status       string `json:"status"` // "idle", "syncing", "done", "error"
+	Message      string `json:"message"`
+}
+
 var (
-	logMu       sync.RWMutex
-	logRing     []LogItem
-	genProgress GenProgress
+	logMu        sync.RWMutex
+	logRing      []LogItem
+	genProgress  GenProgress
+	syncProgress SyncProgress
 )
 
 func addLog(level, msg string) {
@@ -295,19 +307,79 @@ func main() {
 		_, _ = w.Write([]byte(htmlContent))
 	})
 
+	// Get Sync Progress
+	mux.HandleFunc("GET /api/accounts/sync-progress", func(w http.ResponseWriter, r *http.Request) {
+		syncProgress.Lock()
+		defer syncProgress.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"active":        syncProgress.Active,
+			"total":         syncProgress.Total,
+			"completed":     syncProgress.Completed,
+			"current_email": syncProgress.CurrentEmail,
+			"status":        syncProgress.Status,
+			"message":       syncProgress.Message,
+		})
+	})
+
 	// Sync File Index
 	mux.HandleFunc("POST /api/accounts/sync-index", func(w http.ResponseWriter, r *http.Request) {
+		syncProgress.Lock()
+		if syncProgress.Active {
+			syncProgress.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "sync already in progress"})
+			return
+		}
+
+		syncProgress.Active = true
+		syncProgress.Status = "syncing"
+		syncProgress.Completed = 0
+		syncProgress.CurrentEmail = ""
+		syncProgress.Message = "Starting sync..."
+		syncProgress.Unlock()
+
 		addLog("info", "Starting file index synchronization...")
 		go func() {
-			indices, err := mega.CrawlAllAccounts(store.List(), cfg.MegatoolsPath)
+			defer func() {
+				syncProgress.Lock()
+				syncProgress.Active = false
+				if syncProgress.Status != "error" {
+					syncProgress.Status = "done"
+					syncProgress.Message = "Sync complete"
+				}
+				syncProgress.Unlock()
+			}()
+
+			indices, err := mega.CrawlAllAccounts(store.List(), cfg.MegatoolsPath, func(completed, total int, currentEmail string) {
+				syncProgress.Lock()
+				syncProgress.Completed = completed
+				syncProgress.Total = total
+				syncProgress.CurrentEmail = currentEmail
+				syncProgress.Unlock()
+			})
 			if err != nil {
+				syncProgress.Lock()
+				syncProgress.Status = "error"
+				syncProgress.Message = err.Error()
+				syncProgress.Unlock()
 				addLog("error", "Index sync failed: " + err.Error())
 				return
 			}
 			
-			// Save index.json to DATA_DIR
+			// Save index.json to DATA_DIR and data/index.json
 			data, _ := json.MarshalIndent(indices, "", "  ")
-			_ = os.WriteFile(cfg.DataDir + "/index.json", data, 0644)
+			targetPath := "data/index.json"
+			if cfg.DataDir != "" {
+				targetPath = filepath.Join(cfg.DataDir, "index.json")
+			}
+			_ = os.MkdirAll(filepath.Dir(targetPath), 0755)
+			_ = os.WriteFile(targetPath, data, 0644)
+			if targetPath != "data/index.json" {
+				_ = os.MkdirAll("data", 0755)
+				_ = os.WriteFile("data/index.json", data, 0644)
+			}
 			addLog("success", "File index synchronized successfully.")
 		}()
 		w.Header().Set("Content-Type", "application/json")
