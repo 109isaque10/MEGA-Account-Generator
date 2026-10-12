@@ -286,13 +286,23 @@ func main() {
 		_, _ = w.Write([]byte(scriptContent))
 	})
 
-	// Export Standalone HTML Index
-	mux.HandleFunc("GET /api/accounts/export.html", func(w http.ResponseWriter, r *http.Request) {
-		htmlContent := worker.GenerateStandaloneHTML(store.List())
-
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Content-Disposition", "attachment; filename=\"accounts.html\"")
-		_, _ = w.Write([]byte(htmlContent))
+	// Sync File Index
+	mux.HandleFunc("POST /api/accounts/sync-index", func(w http.ResponseWriter, r *http.Request) {
+		addLog("info", "Starting file index synchronization...")
+		go func() {
+			tree, err := mega.CrawlAllAccounts(store.List(), cfg.MegatoolsPath)
+			if err != nil {
+				addLog("error", "Index sync failed: " + err.Error())
+				return
+			}
+			
+			// Save index.json to DATA_DIR
+			data, _ := json.MarshalIndent(tree, "", "  ")
+			_ = os.WriteFile(cfg.DataDir + "/index.json", data, 0644)
+			addLog("success", "File index synchronized successfully.")
+		}()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "sync started"})
 	})
 
 	// Fix Failed Accounts (re-test login to recover verified accounts)

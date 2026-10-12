@@ -353,25 +353,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.location.href = `/api/accounts/export.rclone.conf?union_name=${unionName}&create_policy=${policy}`;
   });
 
-  // Fix Failed Accounts
-  document.getElementById('btnFixFailed').addEventListener('click', async () => {
-    const btn = document.getElementById('btnFixFailed');
-    const orig = btn.textContent;
+  // Sync File Index
+  document.getElementById('btnSyncIndex').addEventListener('click', async () => {
+    const btn = document.getElementById('btnSyncIndex');
     btn.disabled = true;
-    btn.textContent = 'Fixing...';
-
+    btn.textContent = 'Syncing...';
     try {
-      const res = await fetch('/api/accounts/fix-failed', { method: 'POST' });
-      const data = await res.json();
-      alert(`Tested ${data.tested || 0} failed accounts, recovered ${data.recovered || 0}!`);
-      await refreshAccounts();
-      await refreshStatus();
-      await refreshLogs();
+      const res = await fetch('/api/accounts/sync-index', { method: 'POST' });
+      if (res.ok) {
+        alert('File index sync triggered successfully.');
+      } else {
+        alert('Failed to trigger index sync');
+      }
     } catch (err) {
       alert(err.message);
     } finally {
       btn.disabled = false;
-      btn.textContent = orig;
+      btn.textContent = 'Sync File Index';
     }
   });
 

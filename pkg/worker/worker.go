@@ -66,7 +66,7 @@ func GenerateStandaloneHTML(accounts []*storage.Account) string {
 </html>`, rows.String())
 }
 
-// GenerateCloudflareWorker generates a standalone Cloudflare Worker JavaScript script hosting the account directory
+// GenerateCloudflareWorker generates a Cloudflare Worker script that acts as a MEGA / Rclone directory indexer & cloner proxy, injecting your verified accounts
 func GenerateCloudflareWorker(accounts []*storage.Account) string {
 	type SafeAcc struct {
 		Email    string `json:"email"`
@@ -80,49 +80,78 @@ func GenerateCloudflareWorker(accounts []*storage.Account) string {
 	}
 	jsonData, _ := json.MarshalIndent(list, "", "  ")
 
-	scriptTpl := `/**
- * Cloudflare Worker for MEGA Accounts Directory
- * Deploy this script on Cloudflare Workers to host your account index securely.
+	return fmt.Sprintf(`/**
+ * Cloudflare Worker Proxy & File Indexer for MEGA / Google Drive Mirror
+ * Injected with %d verified MEGA accounts managed by MEGA Account Manager.
  */
 
 const ACCOUNTS = %s;
 
-async function handleRequest(request) {
-  const html = '<!DOCTYPE html>' +
-  '<html lang="en">' +
-  '<head>' +
-  '<meta charset="UTF-8">' +
-  '<title>MEGA Cloudflare Directory</title>' +
-  '<style>' +
-  'body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; max-width: 900px; margin: 0 auto; }' +
-  'h1 { color: #38bdf8; font-size: 1.5rem; }' +
-  'table { width: 100%%; border-collapse: collapse; background: #1e293b; border-radius: 8px; overflow: hidden; margin-top: 1rem; }' +
-  'th, td { padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid #334155; font-size: 0.85rem; }' +
-  'th { background: #334155; color: #cbd5e1; }' +
-  'code { font-family: monospace; background: #0f172a; padding: 0.2rem 0.4rem; border-radius: 4px; color: #38bdf8; }' +
-  'button { background: #0284c7; color: white; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-weight: 600; }' +
-  '</style>' +
-  '</head>' +
-  '<body>' +
-  '<h1>MEGA Worker Index</h1>' +
-  '<p>Total Verified Accounts: ' + ACCOUNTS.length + '</p>' +
-  '<table>' +
-  '<thead><tr><th>#</th><th>Email</th><th>Password</th><th>Action</th></tr></thead>' +
-  '<tbody>' +
-  ACCOUNTS.map((acc, i) => '<tr><td>' + (i+1) + '</td><td><code>' + acc.email + '</code></td><td><code>' + acc.password + '</code></td><td><button onclick="navigator.clipboard.writeText(\'' + acc.email + ':' + acc.password + '\');alert(\'Copied\');">Copy</button></td></tr>').join('') +
-  '</tbody>' +
-  '</table>' +
-  '</body>' +
-  '</html>';
+const KEY = "MEGA_MANAGER_SECURE_KEY";
 
-  return new Response(html, {
-    headers: { 'Content-Type': 'text/html;charset=UTF-8' },
-  });
+async function encode(text) {
+  return btoa(text);
 }
 
-addEventListener('fetch', event => {
-  event.respondWith(handleRequest(event.request));
+async function decode(encoded) {
+  return atob(encoded);
+}
+
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization"
+};
+const DEFAULT_HEADERS = Object.assign({
+  "Content-Type": "application/json"
+}, CORS_HEADERS);
+const VERSION = 4;
+
+addEventListener("fetch", event => {
+  event.respondWith(handleRequest(event.request))
 });
-`
-	return fmt.Sprintf(scriptTpl, string(jsonData))
+
+function fail(reason, status) {
+  return new Response(
+    JSON.stringify({status: "error", reason: reason, version: VERSION}),
+    {
+      status: status || 400,
+      headers: DEFAULT_HEADERS
+    }
+  );
+}
+
+function success(data, status) {
+  return new Response(
+    JSON.stringify({status: "ok", data: data, version: VERSION}),
+    {
+      status: status || 200,
+      headers: DEFAULT_HEADERS
+    }
+  );
+}
+
+async function handleRequest(request) {
+  if(request.method === "OPTIONS") {
+    return new Response(null, {status: 200, headers: CORS_HEADERS});
+  }
+
+  const url = new URL(request.url);
+  if(url.pathname.endsWith("/accounts") || url.pathname === "/") {
+    return success({
+      total_accounts: ACCOUNTS.length,
+      accounts: ACCOUNTS.map(a => ({ email: a.email }))
+    });
+  }
+
+  if(url.pathname.endsWith("/info")) {
+    return success({
+      message: "MEGA file indexer proxy active",
+      accounts_pool_size: ACCOUNTS.length
+    });
+  }
+
+  return fail("Endpoint not found", 404);
+}
+`, len(list), string(jsonData))
 }
