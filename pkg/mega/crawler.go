@@ -1,8 +1,11 @@
 package mega
 
 import (
+	"bytes"
 	"fmt"
+	"log"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/109isaque10/mega-account-generator/pkg/storage"
@@ -40,13 +43,31 @@ func CrawlAllAccounts(accounts []*storage.Account, megatoolsPath string, onProgr
 			onProgress(i, total, acc.Email)
 		}
 
-		accNode := &FileNode{Name: "Root", Path: "/Root", IsDir: true, Children: []*FileNode{}}
+		accNode := &FileNode{Name: "/", Path: "/", IsDir: true, Children: []*FileNode{}}
 
-		// Run: megatools ls -l -R -u <email> -p <password>
-		cmd := exec.Command(megatoolsPath, "ls", "-l", "-R", "-u", acc.Email, "-p", acc.MegaPassword)
-		out, err := cmd.Output()
-		if err == nil && len(out) > 0 {
-			lines := strings.Split(string(out), "\n")
+		// Run: megatools ls -l -R -u <email> -p <password> --no-ask-password /Root
+		cmd := exec.Command(megatoolsPath, "ls", "-l", "-R", "-u", acc.Email, "-p", acc.MegaPassword, "--no-ask-password", "/Root")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+
+		if err != nil {
+			errStr := strings.TrimSpace(stderr.String())
+			log.Printf("[CRAWLER] Account %s listing notice: %v (details: %s)", acc.Email, err, errStr)
+			// If listing with /Root fails or returns non-zero, retry with basic ls without /Root
+			cmdFallback := exec.Command(megatoolsPath, "ls", "-l", "-R", "-u", acc.Email, "-p", acc.MegaPassword, "--no-ask-password")
+			var fbStdout, fbStderr bytes.Buffer
+			cmdFallback.Stdout = &fbStdout
+			cmdFallback.Stderr = &fbStderr
+			if fbErr := cmdFallback.Run(); fbErr == nil && fbStdout.Len() > 0 {
+				stdout = fbStdout
+				err = nil
+			}
+		}
+
+		if stdout.Len() > 0 {
+			lines := strings.Split(stdout.String(), "\n")
 			for _, line := range lines {
 				isDir, size, path, ok := parseMegatoolsLine(line)
 				if ok && path != "" {
@@ -90,14 +111,14 @@ func parseMegatoolsLine(line string) (isDir bool, size int64, path string, ok bo
 		return isDir, size, path, true
 	} else if strings.HasPrefix(line, "/") {
 		// Plain megatools ls output without -l
-		isDir = !strings.Contains(line[strings.LastIndex(line, "/"):], ".")
+		isDir = !strings.Contains(filepath.Base(line), ".")
 		return isDir, 0, line, true
 	}
 	return false, 0, "", false
 }
 
 func addToTree(root *FileNode, fullPath string, size int64, isDir bool) {
-	// Strip leading /Root or /
+	// Strip leading /Root or / so files live directly at root / (matching rclone behavior)
 	clean := strings.TrimPrefix(fullPath, "/Root")
 	clean = strings.Trim(clean, "/")
 	if clean == "" {
@@ -105,8 +126,10 @@ func addToTree(root *FileNode, fullPath string, size int64, isDir bool) {
 	}
 	parts := strings.Split(clean, "/")
 	curr := root
+	runningPath := ""
 	for i, part := range parts {
 		isLeaf := (i == len(parts)-1)
+		runningPath += "/" + part
 		found := false
 		for _, child := range curr.Children {
 			if child.Name == part {
@@ -115,6 +138,7 @@ func addToTree(root *FileNode, fullPath string, size int64, isDir bool) {
 				if isLeaf {
 					curr.IsDir = isDir
 					curr.Size = size
+					curr.Path = runningPath
 				}
 				break
 			}
@@ -128,7 +152,7 @@ func addToTree(root *FileNode, fullPath string, size int64, isDir bool) {
 			}
 			newNode := &FileNode{
 				Name:     part,
-				Path:     fullPath,
+				Path:     runningPath,
 				IsDir:    nodeIsDir,
 				Size:     nodeSize,
 				Children: []*FileNode{},
