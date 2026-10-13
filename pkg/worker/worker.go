@@ -12,8 +12,9 @@ import (
 )
 
 type WorkerAccount struct {
-	ID    string `json:"id"`
-	Email string `json:"email"`
+	ID       string `json:"id"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type UnionItem struct {
@@ -22,6 +23,7 @@ type UnionItem struct {
 	IsDir       bool         `json:"is_dir"`
 	Size        int64        `json:"size"`
 	Account     string       `json:"account"`
+	Hash        string       `json:"hash,omitempty"`
 	DownloadURL string       `json:"download_url,omitempty"`
 	Children    []*UnionItem `json:"children,omitempty"`
 }
@@ -79,7 +81,11 @@ func convertFileNode(node *mega.FileNode, accountTag string) *UnionItem {
 		IsDir:    node.IsDir,
 		Size:     node.Size,
 		Account:  accountTag,
+		Hash:     node.Hash,
 		Children: make([]*UnionItem, 0, len(node.Children)),
+	}
+	if !node.IsDir && node.Hash != "" && accountTag != "" {
+		item.DownloadURL = "/d/" + accountTag + "/" + node.Hash
 	}
 	for _, ch := range node.Children {
 		item.Children = append(item.Children, convertFileNode(ch, accountTag))
@@ -125,8 +131,9 @@ func GenerateCloudflareWorker(accounts []*storage.Account) []WorkerFile {
 		if acc.Status == "verified" {
 			remoteID := fmt.Sprintf("mega_%d", idx)
 			workerAccounts = append(workerAccounts, WorkerAccount{
-				ID:    remoteID,
-				Email: acc.Email,
+				ID:       remoteID,
+				Email:    acc.Email,
+				Password: acc.MegaPassword,
 			})
 			accountMap[acc.Email] = remoteID
 			idx++
@@ -228,6 +235,10 @@ func buildWorkerJS(accountsJSON string) string {
 //
 // The union file index (public/union-tree.json) is deployed as a static asset
 // and loaded through the ASSETS binding, bypassing the Worker bundle size limit.
+//
+// NOTE: this bundle embeds your MEGA account credentials so the worker can
+// authenticate to the MEGA API for private-file downloads (/d/... routes).
+// Treat the deployed worker like rclone.conf: keep the Worker dashboard private.
 
 const ACCOUNTS = ` + accountsJSON + `;
 const publicTreeCache = {};
@@ -296,6 +307,12 @@ export default {
       if (pubFileDownloadMatch) {
         const [, fileHandle, keyB64] = pubFileDownloadMatch;
         return await handlePublicFileDownload(request, fileHandle, keyB64);
+      }
+
+      // 6b. Private account file download: /d/ACCOUNT_ID/NODE_HASH
+      const privDownloadMatch = url.pathname.match(/^\/d\/([a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)$/);
+      if (privDownloadMatch) {
+        return await handlePrivateDownload(request, privDownloadMatch[1], privDownloadMatch[2]);
       }
 
       // 6. Public single-file INDEX page: /pf/HANDLE/KEY
@@ -367,7 +384,9 @@ function renderUnionUI(tree, currentPath, origin) {
         : '<svg class="w-10 h-10 text-cyan-400 group-hover:scale-110 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>';
       
       const sub = currentPath ? currentPath + "/" + item.name : item.name;
-      const targetUrl = isFolder ? "/u/" + encodeURIComponent(sub) : (item.download_url || "#");
+      const targetUrl = isFolder
+        ? "/u/" + encodeURIComponent(sub)
+        : (item.download_url || (item.hash && item.account ? "/d/" + encodeURIComponent(item.account) + "/" + encodeURIComponent(item.hash) : "#"));
       const accountBadge = item.account ? '<span class="text-[10px] bg-indigo-950 text-indigo-300 border border-indigo-700/50 px-2 py-0.5 rounded-full ml-2">' + escapeHtml(item.account) + '</span>' : '';
 
       return '<div onclick="navigate(\'' + targetUrl + '\')" class="group flex items-center justify-between p-4 rounded-2xl hover:bg-white/[0.03] border border-transparent hover:border-white/5 transition-all duration-150 cursor-pointer">' +
@@ -384,7 +403,9 @@ function renderUnionUI(tree, currentPath, origin) {
         '<div class="shrink-0">' +
           (isFolder
             ? '<button class="bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white px-3.5 py-1.5 rounded-lg text-xs font-semibold border border-white/5 transition-all duration-150">Open</button>'
-            : '<a href="' + targetUrl + '" class="bg-indigo-600 hover:bg-indigo-500 text-white px-3.5 py-1.5 rounded-lg text-xs font-semibold shadow-lg shadow-indigo-600/20 transition-all duration-150">Download</a>') +
+            : (targetUrl !== "#"
+              ? '<a href="' + targetUrl + '" class="bg-indigo-600 hover:bg-indigo-500 text-white px-3.5 py-1.5 rounded-lg text-xs font-semibold shadow-lg shadow-indigo-600/20 transition-all duration-150">Download</a>'
+              : '<span class="bg-white/5 text-gray-500 px-3.5 py-1.5 rounded-lg text-xs font-semibold border border-white/5" title="This file has no node hash in the index. Re-run Sync File Index to regenerate it.">Unavailable</span>')) +
         '</div>' +
       '</div>';
     }).join("");
@@ -650,6 +671,147 @@ async function handlePublicFolderDownload(request, folderHandle, keyB64, nodeHas
   });
   const apiData = await apiRes.json();
   return streamMegaFile(request, { size: node.size || 0, name: node.name, key: node.key, iv: node.iv }, apiData[0].g);
+}
+
+// --- Private account downloads ---
+// Downloads of files that live inside the pooled MEGA accounts require an
+// authenticated MEGA API session: the file download URL (a:"g") is only issued
+// to the owning session. Each account logs in lazily and the resulting session
+// id + decrypted node map are cached at module scope (per isolate).
+
+const accountSessionCache = {}; // accountId -> { ctx, time }
+
+function encodeBase64Url(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function megaApi(payload, sid) {
+  const sn = Math.floor(Math.random() * 2147483647);
+  const res = await fetch("https://g.api.mega.co.nz/cs?id=" + sn + (sid ? "&sid=" + encodeURIComponent(sid) : ""), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) throw new Error("MEGA API request failed: HTTP " + res.status);
+  const data = await res.json();
+  if (typeof data[0] === "number") throw new Error("MEGA API error " + data[0] + " for action " + (payload[0] && payload[0].a));
+  return data;
+}
+
+// MEGA stores RSA private key components as length-prefixed big ints (MPIs).
+function parseMPI(bytes, offset) {
+  const bitLen = (bytes[offset] << 8) | bytes[offset + 1];
+  const byteLen = (bitLen + 7) >> 3;
+  let v = 0n;
+  for (let i = 0; i < byteLen; i++) v = (v << 8n) | BigInt(bytes[offset + 2 + i]);
+  return [v, offset + 2 + byteLen];
+}
+
+function bigIntModPow(base, exp, mod) {
+  base = base % mod;
+  let result = 1n;
+  while (exp > 0n) {
+    if (exp & 1n) result = (result * base) % mod;
+    exp >>= 1n;
+    base = (base * base) % mod;
+  }
+  return result;
+}
+
+function bigIntToBytes(v) {
+  let hex = v.toString(16);
+  if (hex.length % 2) hex = "0" + hex;
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return out;
+}
+
+// MEGA v2-login, mirroring t3rm1n4l/go-mega: PBKDF2-HMAC-SHA512 (100k) derives
+// a 32-byte key; the first half decrypts the master key, the second half is
+// sent as "uh". The session id is RSA-decrypted from "csid" using the private
+// key material in "privk" (AES-ECB decrypted with the master key).
+async function megaLogin(email, password) {
+  email = email.toLowerCase().trim();
+  const pre = await megaApi([{ a: "us0", user: email }]);
+  const info = pre[0];
+  if (!info || info.v !== 2 || !info.s) {
+    throw new Error("Unsupported MEGA account version for " + email + " (only v2 accounts can log in)");
+  }
+  const pwMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const derived = new Uint8Array(await crypto.subtle.deriveBits(
+    { name: "PBKDF2", hash: "SHA-512", salt: decodeBase64(info.s), iterations: 100000 }, pwMaterial, 256));
+  const passKey = derived.slice(0, 16);
+  const authKey = derived.slice(16, 32);
+
+  const sek = crypto.getRandomValues(new Uint8Array(16));
+  const loginRes = await megaApi([{ a: "us", user: email, uh: encodeBase64Url(authKey), sek: encodeBase64Url(sek) }]);
+  const lr = loginRes[0];
+  if (!lr || !lr.k || !lr.privk || !lr.csid) throw new Error("MEGA login failed for " + email);
+
+  const masterKey = decryptAesEcbJS(passKey, decodeBase64(lr.k));
+  const privk = decryptAesEcbJS(masterKey, decodeBase64(lr.privk));
+  const r1 = parseMPI(privk, 0);
+  const r2 = parseMPI(privk, r1[1]);
+  const r3 = parseMPI(privk, r2[1]);
+  const sidPlain = rsaDecryptToBytes(decodeBase64(lr.csid), r1[0], r2[0], r3[0]);
+  return { sid: encodeBase64Url(sidPlain.slice(0, 43)), masterKey: masterKey };
+}
+
+function rsaDecryptToBytes(cipherBytes, p, q, d) {
+  let c = 0n;
+  for (let i = 0; i < cipherBytes.length; i++) c = (c << 8n) | BigInt(cipherBytes[i]);
+  return bigIntToBytes(bigIntModPow(c, d, p * q));
+}
+
+// Logs in (once per isolate) and builds a node-hash -> decrypted key map.
+async function getAccountContext(accountId) {
+  const now = Date.now();
+  const cached = accountSessionCache[accountId];
+  if (cached && (now - cached.time < 50 * 60 * 1000)) return cached.ctx;
+
+  const account = ACCOUNTS.find(a => a.id === accountId);
+  if (!account) return null;
+  if (!account.password) {
+    throw new Error("Account " + accountId + " has no password embedded. Re-export the worker bundle from the dashboard.");
+  }
+
+  const session = await megaLogin(account.email, account.password);
+  const fsRes = await megaApi([{ a: "f", c: 1 }], session.sid);
+  const nodes = {};
+  for (const itm of (fsRes[0].f || [])) {
+    if (itm.t !== 0 || typeof itm.k !== "string") continue;
+    try {
+      const kParts = itm.k.split(":");
+      if (kParts.length < 2) continue;
+      const keyBytes = decryptAesEcbJS(session.masterKey, decodeBase64(kParts[kParts.length - 1]));
+      if (keyBytes.length < 32) continue;
+      const key = new Uint8Array(16);
+      for (let i = 0; i < 16; i++) key[i] = keyBytes[i] ^ keyBytes[i + 16];
+      const iv = new Uint8Array(16);
+      iv.set(keyBytes.subarray(16, 24), 0);
+      let name = "download.bin";
+      try {
+        const attr = await decryptAttr(key, itm.a);
+        if (attr && attr.n) name = attr.n;
+      } catch (e) {}
+      nodes[itm.h] = { key: key, iv: iv, size: itm.s || 0, name: name };
+    } catch (e) {}
+  }
+
+  const ctx = { sid: session.sid, nodes: nodes };
+  accountSessionCache[accountId] = { ctx: ctx, time: now };
+  return ctx;
+}
+
+async function handlePrivateDownload(request, accountId, nodeHash) {
+  const ctx = await getAccountContext(accountId);
+  if (!ctx) return new Response("Unknown account '" + accountId + "'", { status: 404 });
+  const node = ctx.nodes[nodeHash];
+  if (!node) return new Response("File not found in account '" + accountId + "' (index may be stale — re-run Sync File Index)", { status: 404 });
+  const apiData = await megaApi([{ a: "g", g: 1, n: nodeHash }], ctx.sid);
+  return streamMegaFile(request, node, apiData[0].g);
 }
 
 async function handlePublicFileDownload(request, fileHandle, keyB64) {

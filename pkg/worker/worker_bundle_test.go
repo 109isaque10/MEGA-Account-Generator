@@ -26,6 +26,12 @@ func TestGenerateCloudflareWorkerBundle(t *testing.T) {
 	if !strings.Contains(js, "getUnionTree") {
 		t.Error("worker.js should load the tree via getUnionTree")
 	}
+	if !strings.Contains(js, "handlePrivateDownload") {
+		t.Error("worker.js missing private-account download route")
+	}
+	if strings.Contains(js, `item.download_url || "#"`) {
+		t.Error("worker.js union UI still falls back to a dead '#' download link")
+	}
 	cfg, ok := byName["wrangler.jsonc"]
 	if !ok {
 		t.Fatal("missing wrangler.jsonc")

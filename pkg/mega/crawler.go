@@ -3,8 +3,8 @@ package mega
 import (
 	"log"
 
-	gomega "github.com/t3rm1n4l/go-mega"
 	"github.com/109isaque10/mega-account-generator/pkg/storage"
+	gomega "github.com/t3rm1n4l/go-mega"
 )
 
 type FileNode struct {
@@ -12,6 +12,7 @@ type FileNode struct {
 	Path     string      `json:"path"`
 	Size     int64       `json:"size"`
 	IsDir    bool        `json:"is_dir"`
+	Hash     string      `json:"hash,omitempty"`
 	Children []*FileNode `json:"children,omitempty"`
 }
 
@@ -83,6 +84,7 @@ func crawlGoMegaNode(m *gomega.Mega, currNode *gomega.Node, currentPath string, 
 			Path:     childPath,
 			IsDir:    isDir,
 			Size:     size,
+			Hash:     ch.GetHash(),
 			Children: []*FileNode{},
 		}
 
