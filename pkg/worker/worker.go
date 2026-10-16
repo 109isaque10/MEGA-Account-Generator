@@ -15,6 +15,11 @@ type WorkerAccount struct {
 	ID       string `json:"id"`
 	Email    string `json:"email"`
 	Password string `json:"password"`
+	// Precomputed MEGA v1 login material (megatools-registered accounts):
+	// the password key and user handle hash, so the worker never has to run
+	// the 65536-round KDF at request time.
+	V1Key string `json:"v1_key,omitempty"`
+	V1Uh  string `json:"v1_uh,omitempty"`
 }
 
 type UnionItem struct {
@@ -130,10 +135,13 @@ func GenerateCloudflareWorker(accounts []*storage.Account) []WorkerFile {
 	for _, acc := range accounts {
 		if acc.Status == "verified" {
 			remoteID := fmt.Sprintf("mega_%d", idx)
+			v1Key, v1Uh := mega.V1LoginMaterial(acc.Email, acc.MegaPassword)
 			workerAccounts = append(workerAccounts, WorkerAccount{
 				ID:       remoteID,
 				Email:    acc.Email,
 				Password: acc.MegaPassword,
+				V1Key:    v1Key,
+				V1Uh:     v1Uh,
 			})
 			accountMap[acc.Email] = remoteID
 			idx++
@@ -728,25 +736,42 @@ function bigIntToBytes(v) {
   return out;
 }
 
-// MEGA v2-login, mirroring t3rm1n4l/go-mega: PBKDF2-HMAC-SHA512 (100k) derives
-// a 32-byte key; the first half decrypts the master key, the second half is
-// sent as "uh". The session id is RSA-decrypted from "csid" using the private
+// MEGA login, mirroring t3rm1n4l/go-mega for both account versions:
+//  - v1 (legacy, used by megatools-registered accounts): login with the
+//    password key + user handle hash precomputed at export time. The raw v1
+//    KDF is a 65536-round AES loop, far too slow to run per request.
+//  - v2: PBKDF2-HMAC-SHA512 (100k rounds) derives a 32-byte key; the first
+//    half decrypts the master key, the second half is sent as "uh".
+// In both cases the session id is RSA-decrypted from "csid" using the private
 // key material in "privk" (AES-ECB decrypted with the master key).
-async function megaLogin(email, password) {
-  email = email.toLowerCase().trim();
+async function megaLogin(account) {
+  const email = account.email.toLowerCase().trim();
   const pre = await megaApi([{ a: "us0", user: email }]);
   const info = pre[0];
-  if (!info || info.v !== 2 || !info.s) {
-    throw new Error("Unsupported MEGA account version for " + email + " (only v2 accounts can log in)");
+  let passKey, uh, sek = null;
+  if (info && info.v === 1) {
+    if (!account.v1_key || !account.v1_uh) {
+      throw new Error("Account " + (account.id || email) + " is a v1 MEGA account but this bundle has no precomputed v1 login material. Re-export the worker bundle from the dashboard.");
+    }
+    passKey = decodeBase64(account.v1_key);
+    uh = account.v1_uh;
+  } else if (info && info.v === 2 && info.s) {
+    if (!account.password) {
+      throw new Error("Account " + (account.id || email) + " has no password embedded. Re-export the worker bundle from the dashboard.");
+    }
+    const pwMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(account.password), "PBKDF2", false, ["deriveBits"]);
+    const derived = new Uint8Array(await crypto.subtle.deriveBits(
+      { name: "PBKDF2", hash: "SHA-512", salt: decodeBase64(info.s), iterations: 100000 }, pwMaterial, 256));
+    passKey = derived.slice(0, 16);
+    uh = encodeBase64Url(derived.slice(16, 32));
+    sek = encodeBase64Url(crypto.getRandomValues(new Uint8Array(16)));
+  } else {
+    throw new Error("Unsupported MEGA account version for " + email + " (prelogin returned v=" + (info ? info.v : "?") + ")");
   }
-  const pwMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
-  const derived = new Uint8Array(await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: "SHA-512", salt: decodeBase64(info.s), iterations: 100000 }, pwMaterial, 256));
-  const passKey = derived.slice(0, 16);
-  const authKey = derived.slice(16, 32);
 
-  const sek = crypto.getRandomValues(new Uint8Array(16));
-  const loginRes = await megaApi([{ a: "us", user: email, uh: encodeBase64Url(authKey), sek: encodeBase64Url(sek) }]);
+  const loginPayload = { a: "us", user: email, uh: uh };
+  if (sek) loginPayload.sek = sek;
+  const loginRes = await megaApi([loginPayload]);
   const lr = loginRes[0];
   if (!lr || !lr.k || !lr.privk || !lr.csid) throw new Error("MEGA login failed for " + email);
 
@@ -755,14 +780,10 @@ async function megaLogin(email, password) {
   const r1 = parseMPI(privk, 0);
   const r2 = parseMPI(privk, r1[1]);
   const r3 = parseMPI(privk, r2[1]);
-  const sidPlain = rsaDecryptToBytes(decodeBase64(lr.csid), r1[0], r2[0], r3[0]);
+  // csid is also MPI-encoded: 2-byte bit length followed by the RSA ciphertext
+  const r0 = parseMPI(decodeBase64(lr.csid), 0);
+  const sidPlain = bigIntToBytes(bigIntModPow(r0[0], r3[0], r1[0] * r2[0]));
   return { sid: encodeBase64Url(sidPlain.slice(0, 43)), masterKey: masterKey };
-}
-
-function rsaDecryptToBytes(cipherBytes, p, q, d) {
-  let c = 0n;
-  for (let i = 0; i < cipherBytes.length; i++) c = (c << 8n) | BigInt(cipherBytes[i]);
-  return bigIntToBytes(bigIntModPow(c, d, p * q));
 }
 
 // Logs in (once per isolate) and builds a node-hash -> decrypted key map.
@@ -773,11 +794,8 @@ async function getAccountContext(accountId) {
 
   const account = ACCOUNTS.find(a => a.id === accountId);
   if (!account) return null;
-  if (!account.password) {
-    throw new Error("Account " + accountId + " has no password embedded. Re-export the worker bundle from the dashboard.");
-  }
 
-  const session = await megaLogin(account.email, account.password);
+  const session = await megaLogin(account);
   const fsRes = await megaApi([{ a: "f", c: 1 }], session.sid);
   const nodes = {};
   for (const itm of (fsRes[0].f || [])) {
