@@ -1,5 +1,6 @@
 services:
   mega-manager:
+    build: .
     image: ghcr.io/109isaque10/mega-account-generator:latest
     container_name: mega-account-manager
     restart: unless-stopped

@@ -7,6 +7,8 @@ if (!['en', 'pt', 'es'].includes(currentLang)) {
 let dict = {};
 let accountsList = [];
 let isGenerating = false;
+let accountsPage = 1;
+const ACCOUNTS_PER_PAGE = 20;
 
 // Dynamic string resolver - NO fixed strings
 function t(key, ...args) {
@@ -127,6 +129,8 @@ async function refreshAccounts() {
 function renderAccountsTable() {
   const tbody = document.getElementById('accountsTableBody');
   const emptyState = document.getElementById('emptyAccountsState');
+  const paginationEl = document.getElementById('paginationControls');
+  const countPill = document.getElementById('accountsCountPill');
   const query = (document.getElementById('tableSearch').value || '').toLowerCase().trim();
 
   const filtered = accountsList.filter(acc => {
@@ -136,14 +140,27 @@ function renderAccountsTable() {
            (acc.purpose && acc.purpose.toLowerCase().includes(query));
   });
 
+  if (countPill) {
+    countPill.textContent = query
+      ? `${filtered.length} / ${accountsList.length}`
+      : `${accountsList.length}`;
+  }
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / ACCOUNTS_PER_PAGE));
+  accountsPage = Math.min(Math.max(accountsPage, 1), totalPages);
+
   if (filtered.length === 0) {
     tbody.innerHTML = '';
     emptyState.style.display = 'block';
+    if (paginationEl) paginationEl.innerHTML = '';
     return;
   }
 
   emptyState.style.display = 'none';
-  tbody.innerHTML = filtered.map(acc => {
+  const pageStart = (accountsPage - 1) * ACCOUNTS_PER_PAGE;
+  const pageItems = filtered.slice(pageStart, pageStart + ACCOUNTS_PER_PAGE);
+
+  tbody.innerHTML = pageItems.map(acc => {
     const badgeClass = acc.status === 'verified' ? 'badge-verified' :
                        acc.status === 'pending' ? 'badge-pending' : 'badge-failed';
     const badgeKey = acc.status === 'verified' ? 'badge_verified' :
@@ -154,6 +171,7 @@ function renderAccountsTable() {
       <tr>
         <td>
           <div style="font-weight: 600; color: var(--text-primary);">${escapeHtml(acc.email)}</div>
+          ${acc.public_folder_url ? `<div style="font-size: 0.72rem; margin-top: 3px;"><a href="${escapeHtml(acc.public_folder_url)}" target="_blank" rel="noopener" style="color: #06b6d4; text-decoration: none;">📁 ${t('lbl_public_folder_url')}</a></div>` : ''}
           ${acc.error_message ? `<div style="font-size: 0.72rem; color: var(--accent-rose);">${escapeHtml(acc.error_message)}</div>` : ''}
         </td>
         <td>
@@ -182,6 +200,45 @@ function renderAccountsTable() {
       </tr>
     `;
   }).join('');
+
+  renderAccountsPagination(filtered.length, totalPages);
+}
+
+function renderAccountsPagination(total, totalPages) {
+  const el = document.getElementById('paginationControls');
+  if (!el) return;
+  if (totalPages <= 1) { el.innerHTML = ''; return; }
+
+  const start = (accountsPage - 1) * ACCOUNTS_PER_PAGE + 1;
+  const end = Math.min(accountsPage * ACCOUNTS_PER_PAGE, total);
+
+  let html = `<button class="btn btn-secondary btn-sm page-btn" data-page="${accountsPage - 1}"${accountsPage === 1 ? ' disabled' : ''}>&#8249;</button>`;
+  for (const p of paginationWindow(accountsPage, totalPages)) {
+    if (p === '…') {
+      html += '<span class="page-ellipsis">…</span>';
+    } else {
+      html += `<button class="btn btn-sm page-btn ${p === accountsPage ? 'btn-accent' : 'btn-secondary'}" data-page="${p}">${p}</button>`;
+    }
+  }
+  html += `<button class="btn btn-secondary btn-sm page-btn" data-page="${accountsPage + 1}"${accountsPage === totalPages ? ' disabled' : ''}>&#8250;</button>`;
+  html += `<span class="page-range">${start}–${end} / ${total}</span>`;
+  el.innerHTML = html;
+}
+
+function paginationWindow(page, totalPages) {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, i) => i + 1);
+  }
+  const pages = [...new Set([1, 2, page - 1, page, page + 1, totalPages - 1, totalPages]
+    .filter(p => p >= 1 && p <= totalPages))].sort((a, b) => a - b);
+  const out = [];
+  let prev = 0;
+  for (const p of pages) {
+    if (p - prev > 1) out.push('…');
+    out.push(p);
+    prev = p;
+  }
+  return out;
 }
 
 function copyCreds(email, pass) {
@@ -302,7 +359,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Search input
-  document.getElementById('tableSearch').addEventListener('input', renderAccountsTable);
+  document.getElementById('tableSearch').addEventListener('input', () => {
+    accountsPage = 1;
+    renderAccountsTable();
+  });
+
+  // Accounts pagination
+  document.getElementById('paginationControls').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-page]');
+    if (!btn || btn.disabled) return;
+    accountsPage = parseInt(btn.dataset.page, 10);
+    renderAccountsTable();
+  });
 
   // Copy webhook URL
   document.getElementById('btnCopyWebhook').addEventListener('click', () => {
@@ -483,6 +551,27 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.error(err);
     }
   });
+
+  // Export Public Folders trigger
+  const btnExportPub = document.getElementById('btnExportPublicFolders');
+  if (btnExportPub) {
+    btnExportPub.addEventListener('click', async () => {
+      btnExportPub.disabled = true;
+      btnExportPub.textContent = t('btn_exporting_public_folders');
+      try {
+        await fetch('/api/accounts/export-public-folders?lang=' + encodeURIComponent(currentLang), { method: 'POST' });
+        refreshLogs();
+        setTimeout(refreshAccounts, 2000);
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setTimeout(() => {
+          btnExportPub.disabled = false;
+          btnExportPub.textContent = t('btn_export_public_folders');
+        }, 3000);
+      }
+    });
+  }
 
   // Migration modal handlers
   const modal = document.getElementById('modalMigrate');

@@ -298,6 +298,55 @@ body {
   font-size: 0.75rem;
 }
 
+/* Button rows (Maintenance / Exports panels) */
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.btn-row .btn {
+  flex: 1 1 auto;
+}
+
+/* Outline color variants */
+.btn-outline-amber {
+  border-color: var(--accent-amber);
+  color: var(--accent-amber);
+}
+
+/* Accounts pagination */
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.page-btn {
+  min-width: 2rem;
+  padding: 0.3rem 0.5rem;
+  font-family: var(--font-mono);
+}
+
+.page-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.page-ellipsis {
+  color: var(--text-muted);
+  padding: 0 0.15rem;
+  font-size: 0.85rem;
+}
+
+.page-range {
+  margin-left: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
 /* Logs Box */
 .logs-container {
   background-color: #050811;
