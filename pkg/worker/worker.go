@@ -220,6 +220,8 @@ func GenerateCloudflareWorker(accounts []*storage.Account) []WorkerFile {
 		{Name: "worker.js", Content: buildWorkerJS(string(foldersJSON))},
 		{Name: "wrangler.jsonc", Content: buildWranglerConfig()},
 		{Name: "public/union-tree.json", Content: string(unionJSON) + "\n"},
+		{Name: "gcore-cdn-settings.json", Content: buildGcoreConfig()},
+		{Name: "GCORE_CDN_GUIDE.md", Content: buildGcoreGuide()},
 	}
 }
 
@@ -263,21 +265,41 @@ async function getUnionTree(env, origin) {
 
 export default {
   async fetch(request, env, ctx) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+          "Access-Control-Allow-Headers": "Range, Content-Type, Accept-Encoding, If-Range",
+          "Access-Control-Max-Age": "86400"
+        }
+      });
+    }
+
     const url = new URL(request.url);
+    const reqHost = request.headers.get("x-forwarded-host") || request.headers.get("host") || url.host;
+    const reqProto = request.headers.get("x-forwarded-proto") || (url.protocol.startsWith("https") ? "https" : "http");
+    const cdnOrigin = reqProto + "://" + reqHost;
 
     try {
       // 1. Root / Union file tree index
       if (url.pathname === "/" || url.pathname === "/union" || url.pathname.startsWith("/u/")) {
         const subPath = url.pathname.startsWith("/u/") ? decodeURIComponent(url.pathname.substring(3)) : "";
-        const unionTree = await getUnionTree(env, url.origin);
-        return renderUnionUI(unionTree, subPath, url.origin);
+        const unionTree = await getUnionTree(env, cdnOrigin);
+        return renderUnionUI(unionTree, subPath, cdnOrigin);
       }
 
       // 2. Union raw JSON index endpoint
       if (url.pathname === "/api/union.json") {
-        const unionTree = await getUnionTree(env, url.origin);
+        const unionTree = await getUnionTree(env, cdnOrigin);
         return new Response(JSON.stringify(unionTree, null, 2), {
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+            "Cache-Control": "public, max-age=60, s-maxage=300"
+          }
         });
       }
 
@@ -299,7 +321,7 @@ export default {
       const playMatch = url.pathname.match(/^\/play\/([a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)\/?$/);
       if (playMatch) {
         const [, folderHandle, keyB64, nodeHash] = playMatch;
-        return await renderHLSPlayer(folderHandle, keyB64, nodeHash, url.origin);
+        return await renderHLSPlayer(folderHandle, keyB64, nodeHash, cdnOrigin);
       }
 
       // 6. Direct Range Video Stream: /stream/HANDLE/KEY/HASH
@@ -317,7 +339,7 @@ export default {
         const forceRefresh = url.searchParams.get("refresh") === "1";
         const tree = await getOrFetchPublicTree(folderHandle, keyB64, forceRefresh);
         const sub = url.searchParams.get("sub") || tree.rootHash;
-        return renderUI(tree, sub, url.origin, {
+        return renderUI(tree, sub, cdnOrigin, {
           basePath: "/p/" + folderHandle + "/" + keyB64,
           title: "Public MEGA Folder",
           subtitle: "Browsing a public mega.nz shared folder"
@@ -394,13 +416,29 @@ async function handleHLSPlaylist(folderHandle, keyB64, nodeHash) {
     status: 200,
     headers: {
       "Content-Type": "application/vnd.apple.mpegurl",
-      "Cache-Control": "public, max-age=3600",
-      "Access-Control-Allow-Origin": "*"
+      "Cache-Control": "public, max-age=60, s-maxage=300",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+      "Access-Control-Expose-Headers": "Content-Length, Content-Type, Accept-Ranges"
     }
   });
 }
 
 async function handleHLSSegment(request, folderHandle, keyB64, nodeHash, segIndex, ctx) {
+  if (request.method === "HEAD") {
+    return new Response(null, {
+      status: 200,
+      headers: {
+        "Content-Type": "video/mp2t",
+        "Cache-Control": "public, max-age=2592000, s-maxage=31536000, immutable",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+        "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+        "Accept-Ranges": "bytes"
+      }
+    });
+  }
+
   const cache = caches.default;
   const cacheKey = new Request(request.url, { method: "GET" });
   let cached = await cache.match(cacheKey);
@@ -443,8 +481,10 @@ async function handleHLSSegment(request, folderHandle, keyB64, nodeHash, segInde
     headers: {
       "Content-Type": "video/mp2t",
       "Content-Length": decrypted.byteLength.toString(),
-      "Cache-Control": "public, max-age=604800, s-maxage=2592000",
+      "Cache-Control": "public, max-age=2592000, s-maxage=31536000, immutable",
       "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+      "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
       "Accept-Ranges": "bytes"
     }
   });
@@ -877,6 +917,32 @@ async function fetchPublicFileMeta(fileHandle, keyB64) {
   return { name, size: apiData[0].s || 0 };
 }
 
+function getMimeType(filename) {
+  const ext = (filename || "").split(".").pop().toLowerCase();
+  const types = {
+    mp4: "video/mp4",
+    m4v: "video/mp4",
+    mkv: "video/x-matroska",
+    webm: "video/webm",
+    ts: "video/mp2t",
+    mov: "video/quicktime",
+    avi: "video/x-msvideo",
+    mp3: "audio/mpeg",
+    m4a: "audio/mp4",
+    aac: "audio/aac",
+    flac: "audio/flac",
+    ogg: "audio/ogg",
+    wav: "audio/wav",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    webp: "image/webp",
+    gif: "image/gif",
+    pdf: "application/pdf"
+  };
+  return types[ext] || "application/octet-stream";
+}
+
 async function streamMegaFile(request, node, downloadUrl) {
   const fileSize = node.size || 0;
   const rangeHeader = request.headers.get("Range");
@@ -896,8 +962,30 @@ async function streamMegaFile(request, node, downloadUrl) {
   const aesStart = isRange ? Math.floor(rangeStart / 16) * 16 : 0;
   let discardBytes = isRange ? rangeStart - aesStart : 0;
 
+  const expectedSize = Math.max(0, rangeEnd - rangeStart + 1);
+  const mimeType = getMimeType(node.name);
+
+  const headers = new Headers({
+    "Content-Type": mimeType,
+    "Content-Disposition": 'inline; filename="' + encodeURIComponent(node.name) + '"',
+    "Accept-Ranges": "bytes",
+    "Content-Length": expectedSize.toString(),
+    "Cache-Control": "public, max-age=604800, s-maxage=2592000",
+    "ETag": '"' + (node.hash || "mega") + '"',
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+    "Access-Control-Allow-Headers": "Range, Content-Type, Accept-Encoding, If-Range",
+    "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges, Content-Disposition, ETag"
+  });
+
+  let status = isRange ? 206 : 200;
+  if (isRange) headers.set("Content-Range", "bytes " + rangeStart + "-" + rangeEnd + "/" + fileSize);
+
+  if (request.method === "HEAD") {
+    return new Response(null, { status, headers });
+  }
+
   const cryptoKey = await crypto.subtle.importKey("raw", node.key, { name: "AES-CTR" }, false, ["decrypt"]);
-  const expectedSize = rangeEnd - rangeStart + 1;
   const CHUNK = 32 * 1024 * 1024;
   let pos = aesStart;
   const end = rangeEnd;
@@ -925,15 +1013,6 @@ async function streamMegaFile(request, node, downloadUrl) {
 
   const { readable, writable } = new FixedLengthStream(expectedSize);
   stream.pipeTo(writable).catch(() => {});
-
-  const headers = new Headers({
-    "Content-Type": "application/octet-stream",
-    "Content-Disposition": 'attachment; filename="' + encodeURIComponent(node.name) + '"',
-    "Accept-Ranges": "bytes",
-    "Content-Length": expectedSize.toString()
-  });
-  let status = isRange ? 206 : 200;
-  if (isRange) headers.set("Content-Range", "bytes " + rangeStart + "-" + rangeEnd + "/" + fileSize);
   return new Response(readable, { status, headers });
 }
 
@@ -1124,3 +1203,129 @@ function escapeHtml(text) {
 }
 `
 }
+
+func buildGcoreConfig() string {
+	return `{
+  "name": "MEGA Video & HLS CDN",
+  "description": "Gcore CDN configuration for high-performance video streaming and HLS chunk delivery",
+  "protocol": "HTTPS",
+  "options": {
+    "slice": {
+      "enabled": true,
+      "description": "HTTP range slicing enabled for instant video scrubbing and playback"
+    },
+    "origin_shielding": {
+      "enabled": true,
+      "description": "Shields origin from duplicate cache misses"
+    },
+    "cors": {
+      "enabled": true,
+      "value": ["*"]
+    },
+    "host_header": {
+      "enabled": true,
+      "value": "preserve"
+    },
+    "cache_rules": [
+      {
+        "name": "HLS Playlists (.m3u8)",
+        "pattern": "^/hls/.*\\.m3u8$",
+        "edge_ttl": "60s",
+        "browser_ttl": "60s"
+      },
+      {
+        "name": "HLS Video Segments (.ts)",
+        "pattern": "^/hls/.*\\.ts$",
+        "edge_ttl": "30d",
+        "browser_ttl": "30d"
+      },
+      {
+        "name": "Range Video Stream (/stream/*)",
+        "pattern": "^/stream/.*",
+        "edge_ttl": "7d",
+        "browser_ttl": "7d",
+        "slice": true
+      },
+      {
+        "name": "Direct File Downloads (/p/*/download/*)",
+        "pattern": "^/p/.*/download/.*",
+        "edge_ttl": "7d",
+        "browser_ttl": "7d",
+        "slice": true
+      },
+      {
+        "name": "Union Tree Index (/api/union.json)",
+        "pattern": "^/api/union.json$",
+        "edge_ttl": "5m",
+        "browser_ttl": "5m"
+      }
+    ]
+  }
+}
+`
+}
+
+func buildGcoreGuide() string {
+	return `# Gcore CDN Configuration Guide for MEGA Video CDN
+
+This guide explains how to connect Gcore CDN to your MEGA Video CDN for high-speed edge streaming worldwide.
+
+---
+
+### Step 1: Create a CDN Resource in Gcore
+
+1. Log in to your Gcore Control Panel (https://client.gcore.com/).
+2. Navigate to: CDN -> CDN Resources -> Create CDN Resource.
+3. Select: Accelerate and protect entire site.
+4. Set Origin:
+   - Enter your Cloudflare Worker URL (e.g. https://mega-video-cdn.subdomain.workers.dev) OR your MEGA Manager server domain.
+5. Set your Custom Domain (e.g. cdn.yourdomain.com) or use the default Gcore CNAME (e.g. *.gcdn.co).
+
+---
+
+### Step 2: Configure Essential Video Caching Rules
+
+In your CDN Resource settings:
+
+1. Range Requests / HTTP Slice:
+   - Go to: Cache -> Range Requests (HTTP Slice).
+   - Turn ON (Enabled).
+   - Why: This allows Gcore edge servers to cache byte ranges. When users scrub, jump, or play videos, Gcore serves cached slices directly without re-fetching from MEGA.
+
+2. CORS Headers:
+   - The worker automatically sets:
+     - Access-Control-Allow-Origin: *
+     - Access-Control-Allow-Methods: GET, HEAD, OPTIONS
+     - Access-Control-Allow-Headers: Range, Content-Type, Accept-Encoding, If-Range
+     - Access-Control-Expose-Headers: Content-Range, Content-Length, Accept-Ranges, Content-Disposition, ETag
+   - In Gcore: set CORS to "Pass through origin headers".
+
+3. Origin Shielding:
+   - Go to: Shielding -> enable Origin Shielding.
+   - Select a shield datacenter close to your worker or server.
+   - Why: Aggregates edge cache misses into a single request, protecting against traffic spikes.
+
+4. Host Header:
+   - Set Host Header to "Preserve Host" (or Forward).
+   - The worker automatically detects X-Forwarded-Host to keep all stream and HLS playlist links on your Gcore CDN domain.
+
+---
+
+### Step 3: Verified Edge Endpoints
+
+Once your Gcore CDN resource is active, all paths work directly:
+
+- Unified Catalog UI: https://cdn.yourdomain.com/
+- Embedded Web Player: https://cdn.yourdomain.com/play/HANDLE/KEY/HASH
+- HLS Adaptive Playlist: https://cdn.yourdomain.com/hls/HANDLE/KEY/HASH/playlist.m3u8
+- Cached HLS Segments: https://cdn.yourdomain.com/hls/HANDLE/KEY/HASH/seg-0.ts
+- Progressive Stream: https://cdn.yourdomain.com/stream/HANDLE/KEY/HASH
+- Direct Download: https://cdn.yourdomain.com/p/HANDLE/KEY/download/HASH
+`
+}
+
+// GenerateGcoreConfig returns a JSON string representing Gcore CDN settings
+func GenerateGcoreConfig(accounts []*storage.Account) string {
+	return buildGcoreConfig()
+}
+

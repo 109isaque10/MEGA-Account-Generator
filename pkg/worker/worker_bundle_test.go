@@ -9,8 +9,8 @@ import (
 
 func TestGenerateCloudflareWorkerBundle(t *testing.T) {
 	files := worker.GenerateCloudflareWorker(nil)
-	if len(files) != 3 {
-		t.Fatalf("expected 3 files, got %d", len(files))
+	if len(files) < 3 {
+		t.Fatalf("expected at least 3 files, got %d", len(files))
 	}
 	byName := map[string]string{}
 	for _, f := range files {

@@ -339,6 +339,14 @@ func main() {
 		_, _ = w.Write([]byte(htmlContent))
 	})
 
+	// Export Gcore CDN Configuration
+	mux.HandleFunc("GET /api/accounts/export.gcore.json", func(w http.ResponseWriter, r *http.Request) {
+		gcoreJSON := worker.GenerateGcoreConfig(store.List())
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Disposition", "attachment; filename=\"gcore-cdn-settings.json\"")
+		_, _ = w.Write([]byte(gcoreJSON))
+	})
+
 	// Get Sync Progress
 	mux.HandleFunc("GET /api/accounts/sync-progress", func(w http.ResponseWriter, r *http.Request) {
 		syncProgress.Lock()
