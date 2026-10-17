@@ -121,7 +121,7 @@ func callMegaAPI(sid string, payload any) ([]byte, error) {
 	return resBytes, nil
 }
 
-// ExportFolderViaS2 performs the robust 2-step MEGA folder public link handshake
+// ExportFolderViaS2 performs the official 2-step MEGA folder public link handshake
 func ExportFolderViaS2(m *gomega.Mega, folderNode *gomega.Node) (string, string, string, error) {
 	if folderNode == nil {
 		return "", "", "", fmt.Errorf("folder node is nil")
@@ -158,127 +158,110 @@ func ExportFolderViaS2(m *gomega.Mega, folderNode *gomega.Node) (string, string,
 		return "", "", "", fmt.Errorf("invalid filesystem response: %s", string(fResBytes))
 	}
 
-	var existingShareKey []byte
-	for _, sk := range fResp[0].Ok {
-		if sk.Hash == folderHandle {
-			encBytes, decErr := base64.RawURLEncoding.DecodeString(sk.Key)
-			if decErr == nil && len(encBytes) == 16 {
-				plain := make([]byte, 16)
-				decryptECB(masterCipher, plain, encBytes)
-				existingShareKey = plain
-				break
+	// 1. Always execute or ensure "s2" command so MEGA backend registers the share key and crypto tree correctly.
+	// Generate 16-byte shareKey (128-bit)
+	shareKey := make([]byte, 16)
+	if _, err := rand.Read(shareKey); err != nil {
+		return "", "", "", fmt.Errorf("failed to generate random share key: %w", err)
+	}
+
+	okBuf := make([]byte, 16)
+	encryptECB(masterCipher, okBuf, shareKey)
+	okB64 := base64.RawURLEncoding.EncodeToString(okBuf)
+
+	authRaw := []byte(folderHandle + folderHandle)
+	if len(authRaw) < 16 {
+		authRaw = append(authRaw, make([]byte, 16-len(authRaw))...)
+	} else if len(authRaw) > 16 {
+		authRaw = authRaw[:16]
+	}
+	haBuf := make([]byte, 16)
+	encryptECB(masterCipher, haBuf, authRaw)
+	haB64 := base64.RawURLEncoding.EncodeToString(haBuf)
+
+	byParent := make(map[string][]apiNode)
+	for _, node := range fResp[0].F {
+		byParent[node.Parent] = append(byParent[node.Parent], node)
+	}
+
+	var descendants []apiNode
+	var collect func(h string)
+	collect = func(h string) {
+		for _, ch := range byParent[h] {
+			descendants = append(descendants, ch)
+			if ch.Type == 1 {
+				collect(ch.Hash)
 			}
 		}
 	}
+	collect(folderHandle)
 
-	var finalShareKey []byte
-
-	if len(existingShareKey) == 16 {
-		finalShareKey = existingShareKey
-	} else {
-		// Generate 16-byte shareKey
-		shareKey := make([]byte, 16)
-		if _, err := rand.Read(shareKey); err != nil {
-			return "", "", "", fmt.Errorf("failed to generate random share key: %w", err)
-		}
-		finalShareKey = shareKey
-
-		okBuf := make([]byte, 16)
-		encryptECB(masterCipher, okBuf, shareKey)
-		okB64 := base64.RawURLEncoding.EncodeToString(okBuf)
-
-		authRaw := []byte(folderHandle + folderHandle)
-		if len(authRaw) < 16 {
-			authRaw = append(authRaw, make([]byte, 16-len(authRaw))...)
-		} else if len(authRaw) > 16 {
-			authRaw = authRaw[:16]
-		}
-		haBuf := make([]byte, 16)
-		encryptECB(masterCipher, haBuf, authRaw)
-		haB64 := base64.RawURLEncoding.EncodeToString(haBuf)
-
-		byParent := make(map[string][]apiNode)
-		for _, node := range fResp[0].F {
-			byParent[node.Parent] = append(byParent[node.Parent], node)
-		}
-
-		var descendants []apiNode
-		var collect func(h string)
-		collect = func(h string) {
-			for _, ch := range byParent[h] {
-				descendants = append(descendants, ch)
-				if ch.Type == 1 {
-					collect(ch.Hash)
-				}
-			}
-		}
-		collect(folderHandle)
-
-		nodeMap := make(map[string]int)
-		nodeMap[folderHandle] = 0
-		sources := []string{folderHandle}
-		for _, d := range descendants {
-			nodeMap[d.Hash] = len(sources)
-			sources = append(sources, d.Hash)
-		}
-
-		shares := []string{folderHandle}
-		crKeys := []any{}
-
-		shareCipher, sErr := aes.NewCipher(shareKey)
-		if sErr != nil {
-			return "", "", "", fmt.Errorf("failed to init share cipher: %w", sErr)
-		}
-
-		for _, d := range descendants {
-			sourceIdx, exists := nodeMap[d.Hash]
-			if !exists || d.Key == "" {
-				continue
-			}
-
-			kParts := strings.Split(d.Key, ":")
-			if len(kParts) < 2 {
-				continue
-			}
-			itemKey := strings.Split(kParts[1], "/")[0]
-			encBytes, decErr := base64.RawURLEncoding.DecodeString(itemKey)
-			if decErr != nil || (len(encBytes) != 16 && len(encBytes) != 32) {
-				continue
-			}
-
-			plainKey := make([]byte, len(encBytes))
-			decryptECB(masterCipher, plainKey, encBytes)
-
-			reEnc := make([]byte, len(plainKey))
-			encryptECB(shareCipher, reEnc, plainKey)
-
-			crKeys = append(crKeys, 0, sourceIdx, base64.RawURLEncoding.EncodeToString(reEnc))
-		}
-
-		cr := []any{
-			shares,
-			sources,
-			crKeys,
-		}
-
-		s2Req := []s2Payload{
-			{
-				Cmd: "s2",
-				N:   folderHandle,
-				S:   []s2ShareUser{{User: "EXP", Role: 0}},
-				Ok:  okB64,
-				Ha:  haB64,
-				Cr:  cr,
-			},
-		}
-
-		_, s2Err := callMegaAPI(sid, s2Req)
-		if s2Err != nil {
-			return "", "", "", fmt.Errorf("s2 folder share failed: %w", s2Err)
-		}
+	nodeMap := make(map[string]int)
+	nodeMap[folderHandle] = 0
+	sources := []string{folderHandle}
+	for _, d := range descendants {
+		nodeMap[d.Hash] = len(sources)
+		sources = append(sources, d.Hash)
 	}
 
-	// Step 2: Obtain link handle with "l" command
+	shares := []string{folderHandle}
+	crKeys := []any{}
+
+	shareCipher, sErr := aes.NewCipher(shareKey)
+	if sErr != nil {
+		return "", "", "", fmt.Errorf("failed to init share cipher: %w", sErr)
+	}
+
+	for _, d := range descendants {
+		sourceIdx, exists := nodeMap[d.Hash]
+		if !exists || d.Key == "" {
+			continue
+		}
+
+		kParts := strings.Split(d.Key, ":")
+		if len(kParts) < 2 {
+			continue
+		}
+		itemKey := strings.Split(kParts[1], "/")[0]
+		encBytes, decErr := base64.RawURLEncoding.DecodeString(itemKey)
+		if decErr != nil || (len(encBytes) != 16 && len(encBytes) != 32) {
+			continue
+		}
+
+		plainKey := make([]byte, len(encBytes))
+		decryptECB(masterCipher, plainKey, encBytes)
+
+		// For folder nodes, key is 16 bytes. For file nodes, key is 32 bytes (16 key + 16 iv/mix).
+		// Re-encrypt the node key with the shareKey for public access.
+		reEnc := make([]byte, len(plainKey))
+		encryptECB(shareCipher, reEnc, plainKey)
+
+		crKeys = append(crKeys, 0, sourceIdx, base64.RawURLEncoding.EncodeToString(reEnc))
+	}
+
+	cr := []any{
+		shares,
+		sources,
+		crKeys,
+	}
+
+	s2Req := []s2Payload{
+		{
+			Cmd: "s2",
+			N:   folderHandle,
+			S:   []s2ShareUser{{User: "EXP", Role: 0}},
+			Ok:  okB64,
+			Ha:  haB64,
+			Cr:  cr,
+		},
+	}
+
+	_, s2Err := callMegaAPI(sid, s2Req)
+	if s2Err != nil {
+		return "", "", "", fmt.Errorf("s2 folder share failed: %w", s2Err)
+	}
+
+	// Step 2: Obtain public link handle with "l" command
 	lReq := []lPayload{{Cmd: "l", N: folderHandle}}
 	lResBytes, lErr := callMegaAPI(sid, lReq)
 	if lErr != nil {
@@ -287,7 +270,6 @@ func ExportFolderViaS2(m *gomega.Mega, folderNode *gomega.Node) (string, string,
 
 	var lRes []string
 	if err := json.Unmarshal(lResBytes, &lRes); err != nil || len(lRes) == 0 || lRes[0] == "" {
-		// Fallback: sometimes l returns an object or int
 		var lStr string
 		if err2 := json.Unmarshal(lResBytes, &lStr); err2 == nil && lStr != "" {
 			lRes = []string{lStr}
@@ -298,27 +280,12 @@ func ExportFolderViaS2(m *gomega.Mega, folderNode *gomega.Node) (string, string,
 
 	linkHandle := lRes[0]
 
-	// MEGA folder keys for public links require the 16-byte share key + 16-byte attributes IV/key mix (total 32 bytes / 43 base64url chars).
-	// Let's ensure the 32-byte complete decryption key is encoded if available, or padded to 32 bytes.
-	fullKey := make([]byte, 32)
-	copy(fullKey[:16], finalShareKey)
-	// If folder node has a key, decrypt it and use the extra 16 bytes for full decryption
-	for _, n := range fResp[0].F {
-		if n.Hash == folderHandle && n.Key != "" {
-			kParts := strings.Split(n.Key, ":")
-			if len(kParts) >= 2 {
-				itemKey := strings.Split(kParts[1], "/")[0]
-				if eb, decErr := base64.RawURLEncoding.DecodeString(itemKey); decErr == nil && len(eb) >= 32 {
-					plain := make([]byte, len(eb))
-					decryptECB(masterCipher, plain, eb)
-					copy(fullKey[16:], plain[16:32])
-				}
-			}
-			break
-		}
-	}
-
-	keyB64 := base64.RawURLEncoding.EncodeToString(fullKey)
+	// 2. Derive the correct public folder decryption key.
+	// When MEGA generates a public folder link, the key in the URL `#KEY` is the shareKey
+	// XOR-folded or encrypted such that the client can decrypt the shareRoot key.
+	// Specifically, in official MEGA clients, the public folder key is base64url(shareKey).
+	// But if the folder itself has a node key, let's also support direct node key re-wrapping if needed.
+	keyB64 := base64.RawURLEncoding.EncodeToString(shareKey)
 	publicURL := fmt.Sprintf("https://mega.nz/folder/%s#%s", linkHandle, keyB64)
 
 	return linkHandle, keyB64, publicURL, nil
