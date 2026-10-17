@@ -62,16 +62,13 @@ func CrawlAllAccounts(accounts []*storage.Account, megatoolsPath string, onProgr
 
 				// Auto-export public link if missing
 				if pubHandle == "" || pubKey == "" {
-					if rawLink, lErr := m.Link(rootNode, true); lErr == nil {
-						h, k := parseLinkHandleAndKey(rawLink)
-						if h != "" && k != "" {
-							pubHandle = h
-							pubKey = k
-							pubURL = fmt.Sprintf("https://mega.nz/folder/%s#%s", h, k)
-							acc.PublicFolderHandle = pubHandle
-							acc.PublicFolderKey = pubKey
-							acc.PublicFolderURL = pubURL
-						}
+					if h, k, u, expErr := exportFolderForRoot(m, rootNode); expErr == nil && h != "" && k != "" {
+						pubHandle = h
+						pubKey = k
+						pubURL = u
+						acc.PublicFolderHandle = pubHandle
+						acc.PublicFolderKey = pubKey
+						acc.PublicFolderURL = pubURL
 					}
 				}
 			}
@@ -94,7 +91,10 @@ func CrawlAllAccounts(accounts []*storage.Account, megatoolsPath string, onProgr
 	return indices, nil
 }
 
-// ExportAccountPublicFolder exports a public link for the account's Root folder
+// ExportAccountPublicFolder exports a public link for the account's folder.
+// Since MEGA prohibits exporting the Root drive node directly (API_EACCESS -11),
+// this function targets an existing user folder (such as 'Public' or the top-level folder)
+// or automatically creates a 'Public' directory and moves root files into it.
 func ExportAccountPublicFolder(email, password string) (handle, key, publicURL string, err error) {
 	m := gomega.New()
 	if err := m.Login(email, password); err != nil {
@@ -106,17 +106,65 @@ func ExportAccountPublicFolder(email, password string) (handle, key, publicURL s
 		return "", "", "", fmt.Errorf("root node not found for %s", email)
 	}
 
-	rawLink, err := m.Link(rootNode, true)
+	return exportFolderForRoot(m, rootNode)
+}
+
+func exportFolderForRoot(m *gomega.Mega, rootNode *gomega.Node) (string, string, string, error) {
+	children, err := m.FS.GetChildren(rootNode)
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to export link for %s: %w", email, err)
+		return "", "", "", fmt.Errorf("failed to list root children: %w", err)
 	}
 
-	handle, key = parseLinkHandleAndKey(rawLink)
+	var targetFolder *gomega.Node
+	var folderNodes []*gomega.Node
+
+	for _, ch := range children {
+		if ch.GetType() == gomega.FOLDER {
+			folderNodes = append(folderNodes, ch)
+			nameLower := strings.ToLower(ch.GetName())
+			if nameLower == "public" || nameLower == "shared" {
+				targetFolder = ch
+				break
+			}
+		}
+	}
+
+	// If no explicit "public" folder found, select from available folders
+	if targetFolder == nil {
+		if len(folderNodes) == 1 {
+			targetFolder = folderNodes[0]
+		} else if len(folderNodes) > 1 {
+			targetFolder = folderNodes[0]
+		}
+	}
+
+	// If no folder exists at all, create "Public" folder under root
+	if targetFolder == nil {
+		newFolder, cErr := m.CreateDir("Public", rootNode)
+		if cErr != nil {
+			return "", "", "", fmt.Errorf("failed to create Public directory: %w", cErr)
+		}
+		targetFolder = newFolder
+
+		// Move any loose files in root into the new Public directory
+		for _, ch := range children {
+			if ch.GetType() == gomega.FILE {
+				_ = m.Move(ch, targetFolder)
+			}
+		}
+	}
+
+	rawLink, err := m.Link(targetFolder, true)
+	if err != nil {
+		return "", "", "", fmt.Errorf("failed to export link: %w", err)
+	}
+
+	handle, key := parseLinkHandleAndKey(rawLink)
 	if handle == "" || key == "" {
 		return "", "", "", fmt.Errorf("could not extract handle and key from exported link: %s", rawLink)
 	}
 
-	publicURL = fmt.Sprintf("https://mega.nz/folder/%s#%s", handle, key)
+	publicURL := fmt.Sprintf("https://mega.nz/folder/%s#%s", handle, key)
 	return handle, key, publicURL, nil
 }
 
