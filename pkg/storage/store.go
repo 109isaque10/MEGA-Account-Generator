@@ -22,9 +22,12 @@ type Account struct {
 	Status          string     `json:"status"` // "verified", "pending", "failed"
 	CreatedAt       time.Time  `json:"created_at"`
 	LastLoginAt     *time.Time `json:"last_login_at,omitempty"`
-	LastLoginStatus string     `json:"last_login_status,omitempty"`
-	VerifyCommand   string     `json:"verify_command,omitempty"`
-	ErrorMessage    string     `json:"error_message,omitempty"`
+	LastLoginStatus    string     `json:"last_login_status,omitempty"`
+	VerifyCommand      string     `json:"verify_command,omitempty"`
+	ErrorMessage       string     `json:"error_message,omitempty"`
+	PublicFolderHandle string     `json:"public_folder_handle,omitempty"`
+	PublicFolderKey    string     `json:"public_folder_key,omitempty"`
+	PublicFolderURL    string     `json:"public_folder_url,omitempty"`
 }
 
 type Store struct {
@@ -266,6 +269,21 @@ func (s *Store) RecordLogin(email string, success bool, errMsg string) error {
 		acc.LastLoginStatus = "failed"
 		acc.ErrorMessage = errMsg
 	}
+	return s.saveToJSON()
+}
+
+func (s *Store) UpdatePublicFolder(email, handle, key, url string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	acc, exists := s.accounts[email]
+	if !exists {
+		return fmt.Errorf("account %s not found", email)
+	}
+
+	acc.PublicFolderHandle = handle
+	acc.PublicFolderKey = key
+	acc.PublicFolderURL = url
 	return s.saveToJSON()
 }
 

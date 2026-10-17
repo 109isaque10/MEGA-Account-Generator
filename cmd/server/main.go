@@ -158,6 +158,20 @@ func main() {
 		_ = json.NewEncoder(w).Encode(list)
 	})
 
+	// Export Video Catalog JSON
+	exportVideosHandler := func(w http.ResponseWriter, r *http.Request) {
+		catalog, err := worker.ExtractVideoCatalog(store.List())
+		if err != nil {
+			http.Error(w, "failed to extract video catalog: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=\"videos.json\"")
+		_ = json.NewEncoder(w).Encode(catalog)
+	}
+	mux.HandleFunc("GET /api/accounts/export-videos.json", exportVideosHandler)
+	mux.HandleFunc("GET /api/videos.json", exportVideosHandler)
+
 	// API Logs
 	mux.HandleFunc("GET /api/logs", func(w http.ResponseWriter, r *http.Request) {
 		logMu.RLock()
@@ -434,6 +448,41 @@ func main() {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"tested":    tested,
 			"recovered": recovered,
+		})
+	})
+
+	// Export Public Folders for verified accounts
+	mux.HandleFunc("POST /api/accounts/export-public-folders", func(w http.ResponseWriter, r *http.Request) {
+		lang := r.URL.Query().Get("lang")
+		if lang == "" {
+			lang = "en"
+		}
+		addLog("info", i18n.T(lang, "msg_public_folders_started"))
+		accounts := store.List()
+
+		go func() {
+			exportedCount := 0
+			for _, acc := range accounts {
+				if acc.Status != "verified" {
+					continue
+				}
+
+				handle, key, pubURL, err := mega.ExportAccountPublicFolder(acc.Email, acc.MegaPassword)
+				if err != nil {
+					addLog("warning", i18n.T(lang, "msg_public_folder_failed", acc.Email, err.Error()))
+				} else {
+					_ = store.UpdatePublicFolder(acc.Email, handle, key, pubURL)
+					exportedCount++
+					addLog("success", i18n.T(lang, "msg_public_folder_exported", acc.Email, pubURL))
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+			addLog("success", i18n.T(lang, "msg_public_folders_completed", exportedCount))
+		}()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status": "started",
 		})
 	})
 

@@ -1,7 +1,9 @@
 package mega
 
 import (
+	"fmt"
 	"log"
+	"strings"
 
 	"github.com/109isaque10/mega-account-generator/pkg/storage"
 	gomega "github.com/t3rm1n4l/go-mega"
@@ -13,13 +15,17 @@ type FileNode struct {
 	Size     int64       `json:"size"`
 	IsDir    bool        `json:"is_dir"`
 	Hash     string      `json:"hash,omitempty"`
+	Duration float64     `json:"duration_seconds,omitempty"`
 	Children []*FileNode `json:"children,omitempty"`
 }
 
 type AccountIndex struct {
-	Email    string    `json:"email"`
-	Password string    `json:"password"`
-	Tree     *FileNode `json:"tree"`
+	Email              string    `json:"email"`
+	Password           string    `json:"password"`
+	PublicFolderHandle string    `json:"public_folder_handle,omitempty"`
+	PublicFolderKey    string    `json:"public_folder_key,omitempty"`
+	PublicFolderURL    string    `json:"public_folder_url,omitempty"`
+	Tree               *FileNode `json:"tree"`
 }
 
 // CrawlAllAccounts generates a unified file tree for all verified accounts using go-mega
@@ -42,6 +48,10 @@ func CrawlAllAccounts(accounts []*storage.Account, megatoolsPath string, onProgr
 		accNode := &FileNode{Name: "/", Path: "/", IsDir: true, Children: []*FileNode{}}
 
 		m := gomega.New()
+		pubHandle := acc.PublicFolderHandle
+		pubKey := acc.PublicFolderKey
+		pubURL := acc.PublicFolderURL
+
 		err := m.Login(acc.Email, acc.MegaPassword)
 		if err != nil {
 			log.Printf("[CRAWLER] go-mega login failed for %s: %v", acc.Email, err)
@@ -49,13 +59,31 @@ func CrawlAllAccounts(accounts []*storage.Account, megatoolsPath string, onProgr
 			rootNode := m.FS.GetRoot()
 			if rootNode != nil {
 				crawlGoMegaNode(m, rootNode, "/Root", accNode)
+
+				// Auto-export public link if missing
+				if pubHandle == "" || pubKey == "" {
+					if rawLink, lErr := m.Link(rootNode, true); lErr == nil {
+						h, k := parseLinkHandleAndKey(rawLink)
+						if h != "" && k != "" {
+							pubHandle = h
+							pubKey = k
+							pubURL = fmt.Sprintf("https://mega.nz/folder/%s#%s", h, k)
+							acc.PublicFolderHandle = pubHandle
+							acc.PublicFolderKey = pubKey
+							acc.PublicFolderURL = pubURL
+						}
+					}
+				}
 			}
 		}
 
 		indices = append(indices, &AccountIndex{
-			Email:    acc.Email,
-			Password: acc.MegaPassword,
-			Tree:     accNode,
+			Email:              acc.Email,
+			Password:           acc.MegaPassword,
+			PublicFolderHandle: pubHandle,
+			PublicFolderKey:    pubKey,
+			PublicFolderURL:    pubURL,
+			Tree:               accNode,
 		})
 
 		if onProgress != nil {
@@ -64,6 +92,58 @@ func CrawlAllAccounts(accounts []*storage.Account, megatoolsPath string, onProgr
 	}
 
 	return indices, nil
+}
+
+// ExportAccountPublicFolder exports a public link for the account's Root folder
+func ExportAccountPublicFolder(email, password string) (handle, key, publicURL string, err error) {
+	m := gomega.New()
+	if err := m.Login(email, password); err != nil {
+		return "", "", "", fmt.Errorf("login failed for %s: %w", email, err)
+	}
+
+	rootNode := m.FS.GetRoot()
+	if rootNode == nil {
+		return "", "", "", fmt.Errorf("root node not found for %s", email)
+	}
+
+	rawLink, err := m.Link(rootNode, true)
+	if err != nil {
+		return "", "", "", fmt.Errorf("failed to export link for %s: %w", email, err)
+	}
+
+	handle, key = parseLinkHandleAndKey(rawLink)
+	if handle == "" || key == "" {
+		return "", "", "", fmt.Errorf("could not extract handle and key from exported link: %s", rawLink)
+	}
+
+	publicURL = fmt.Sprintf("https://mega.nz/folder/%s#%s", handle, key)
+	return handle, key, publicURL, nil
+}
+
+func parseLinkHandleAndKey(link string) (string, string) {
+	link = strings.TrimSpace(link)
+	if idx := strings.Index(link, "/folder/"); idx != -1 {
+		rest := link[idx+len("/folder/"):]
+		parts := strings.SplitN(rest, "#", 2)
+		if len(parts) == 2 {
+			return parts[0], parts[1]
+		}
+	}
+	if idx := strings.Index(link, "/#F!"); idx != -1 {
+		rest := link[idx+len("/#F!"):]
+		parts := strings.SplitN(rest, "!", 2)
+		if len(parts) == 2 {
+			return parts[0], parts[1]
+		}
+	}
+	if idx := strings.Index(link, "/#!"); idx != -1 {
+		rest := link[idx+len("/#!"):]
+		parts := strings.SplitN(rest, "!", 2)
+		if len(parts) == 2 {
+			return parts[0], parts[1]
+		}
+	}
+	return "", ""
 }
 
 func crawlGoMegaNode(m *gomega.Mega, currNode *gomega.Node, currentPath string, parentFileNode *FileNode) {

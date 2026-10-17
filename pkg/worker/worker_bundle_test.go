@@ -26,11 +26,17 @@ func TestGenerateCloudflareWorkerBundle(t *testing.T) {
 	if !strings.Contains(js, "getUnionTree") {
 		t.Error("worker.js should load the tree via getUnionTree")
 	}
-	if !strings.Contains(js, "handlePrivateDownload") {
-		t.Error("worker.js missing private-account download route")
+	if !strings.Contains(js, "handleHLSPlaylist") {
+		t.Error("worker.js missing handleHLSPlaylist route")
 	}
-	if strings.Contains(js, `item.download_url || "#"`) {
-		t.Error("worker.js union UI still falls back to a dead '#' download link")
+	if !strings.Contains(js, "handleHLSSegment") {
+		t.Error("worker.js missing handleHLSSegment route")
+	}
+	if !strings.Contains(js, "caches.default") {
+		t.Error("worker.js missing Cloudflare edge caches.default integration")
+	}
+	if strings.Contains(js, "megaLogin") {
+		t.Error("worker.js should not contain private megaLogin credentials code")
 	}
 	cfg, ok := byName["wrangler.jsonc"]
 	if !ok {

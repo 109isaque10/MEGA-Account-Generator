@@ -154,6 +154,7 @@ function renderAccountsTable() {
       <tr>
         <td>
           <div style="font-weight: 600; color: var(--text-primary);">${escapeHtml(acc.email)}</div>
+          ${acc.public_folder_url ? `<div style="font-size: 0.72rem; margin-top: 3px;"><a href="${escapeHtml(acc.public_folder_url)}" target="_blank" rel="noopener" style="color: #06b6d4; text-decoration: none;">📁 ${t('lbl_public_folder_url')}</a></div>` : ''}
           ${acc.error_message ? `<div style="font-size: 0.72rem; color: var(--accent-rose);">${escapeHtml(acc.error_message)}</div>` : ''}
         </td>
         <td>
@@ -483,6 +484,27 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.error(err);
     }
   });
+
+  // Export Public Folders trigger
+  const btnExportPub = document.getElementById('btnExportPublicFolders');
+  if (btnExportPub) {
+    btnExportPub.addEventListener('click', async () => {
+      btnExportPub.disabled = true;
+      btnExportPub.textContent = t('btn_exporting_public_folders');
+      try {
+        await fetch('/api/accounts/export-public-folders?lang=' + encodeURIComponent(currentLang), { method: 'POST' });
+        refreshLogs();
+        setTimeout(refreshAccounts, 2000);
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setTimeout(() => {
+          btnExportPub.disabled = false;
+          btnExportPub.textContent = t('btn_export_public_folders');
+        }, 3000);
+      }
+    });
+  }
 
   // Migration modal handlers
   const modal = document.getElementById('modalMigrate');
