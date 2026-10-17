@@ -154,17 +154,11 @@ func exportFolderForRoot(m *gomega.Mega, rootNode *gomega.Node) (string, string,
 		}
 	}
 
-	rawLink, err := m.Link(targetFolder, true)
+	handle, key, publicURL, err := ExportFolderViaS2(m, targetFolder)
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to export link: %w", err)
+		return "", "", "", fmt.Errorf("failed to export folder via s2: %w", err)
 	}
 
-	handle, key := parseLinkHandleAndKey(rawLink)
-	if handle == "" || key == "" {
-		return "", "", "", fmt.Errorf("could not extract handle and key from exported link: %s", rawLink)
-	}
-
-	publicURL := fmt.Sprintf("https://mega.nz/folder/%s#%s", handle, key)
 	return handle, key, publicURL, nil
 }
 
