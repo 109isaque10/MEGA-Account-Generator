@@ -106,7 +106,6 @@ func callMegaAPI(sid string, payload any) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Check for top-level error codes like [-11] or -11
 	var intArr []int
 	if err := json.Unmarshal(resBytes, &intArr); err == nil && len(intArr) > 0 {
 		if intArr[0] < 0 {
@@ -122,10 +121,7 @@ func callMegaAPI(sid string, payload any) ([]byte, error) {
 	return resBytes, nil
 }
 
-// ExportFolderViaS2 performs the official 2-step MEGA folder public link handshake:
-// 1. "s2" command: registers the folder as an exported share (EXP) with folder share key & cr
-// 2. "l" command: obtains the public link ID
-// Returns linkHandle, base64url(shareKey), publicURL, error
+// ExportFolderViaS2 performs the robust 2-step MEGA folder public link handshake
 func ExportFolderViaS2(m *gomega.Mega, folderNode *gomega.Node) (string, string, string, error) {
 	if folderNode == nil {
 		return "", "", "", fmt.Errorf("folder node is nil")
@@ -151,7 +147,6 @@ func ExportFolderViaS2(m *gomega.Mega, folderNode *gomega.Node) (string, string,
 		return "", "", "", fmt.Errorf("aes cipher error: %w", err)
 	}
 
-	// Step 1: Query filesystem to see existing share keys and descendant nodes
 	fReq := []fPayload{{Cmd: "f", C: 1}}
 	fResBytes, err := callMegaAPI(sid, fReq)
 	if err != nil {
@@ -163,7 +158,6 @@ func ExportFolderViaS2(m *gomega.Mega, folderNode *gomega.Node) (string, string,
 		return "", "", "", fmt.Errorf("invalid filesystem response: %s", string(fResBytes))
 	}
 
-	// Check if this folder already has an exported share key in 'ok'
 	var existingShareKey []byte
 	for _, sk := range fResp[0].Ok {
 		if sk.Hash == folderHandle {
@@ -182,19 +176,17 @@ func ExportFolderViaS2(m *gomega.Mega, folderNode *gomega.Node) (string, string,
 	if len(existingShareKey) == 16 {
 		finalShareKey = existingShareKey
 	} else {
-		// Folder is not yet shared. Generate a new 16-byte shareKey and send "s2" command
+		// Generate 16-byte shareKey
 		shareKey := make([]byte, 16)
 		if _, err := rand.Read(shareKey); err != nil {
 			return "", "", "", fmt.Errorf("failed to generate random share key: %w", err)
 		}
 		finalShareKey = shareKey
 
-		// ok = AES-ECB(masterKey, shareKey)
 		okBuf := make([]byte, 16)
 		encryptECB(masterCipher, okBuf, shareKey)
 		okB64 := base64.RawURLEncoding.EncodeToString(okBuf)
 
-		// ha = AES-ECB(masterKey, folderHandle + folderHandle)
 		authRaw := []byte(folderHandle + folderHandle)
 		if len(authRaw) < 16 {
 			authRaw = append(authRaw, make([]byte, 16-len(authRaw))...)
@@ -205,7 +197,6 @@ func ExportFolderViaS2(m *gomega.Mega, folderNode *gomega.Node) (string, string,
 		encryptECB(masterCipher, haBuf, authRaw)
 		haB64 := base64.RawURLEncoding.EncodeToString(haBuf)
 
-		// Map child nodes by parent to find all descendants
 		byParent := make(map[string][]apiNode)
 		for _, node := range fResp[0].F {
 			byParent[node.Parent] = append(byParent[node.Parent], node)
@@ -216,15 +207,18 @@ func ExportFolderViaS2(m *gomega.Mega, folderNode *gomega.Node) (string, string,
 		collect = func(h string) {
 			for _, ch := range byParent[h] {
 				descendants = append(descendants, ch)
-				if ch.Type == 1 { // folder
+				if ch.Type == 1 {
 					collect(ch.Hash)
 				}
 			}
 		}
 		collect(folderHandle)
 
+		nodeMap := make(map[string]int)
+		nodeMap[folderHandle] = 0
 		sources := []string{folderHandle}
 		for _, d := range descendants {
+			nodeMap[d.Hash] = len(sources)
 			sources = append(sources, d.Hash)
 		}
 
@@ -236,10 +230,9 @@ func ExportFolderViaS2(m *gomega.Mega, folderNode *gomega.Node) (string, string,
 			return "", "", "", fmt.Errorf("failed to init share cipher: %w", sErr)
 		}
 
-		// Re-encrypt keys of descendant nodes with shareKey for public access
-		for idx, d := range descendants {
-			sourceIdx := idx + 1
-			if d.Key == "" {
+		for _, d := range descendants {
+			sourceIdx, exists := nodeMap[d.Hash]
+			if !exists || d.Key == "" {
 				continue
 			}
 
@@ -285,7 +278,7 @@ func ExportFolderViaS2(m *gomega.Mega, folderNode *gomega.Node) (string, string,
 		}
 	}
 
-	// Step 2: Now that the folder is an exported share, obtain the public link handle with "l" command
+	// Step 2: Obtain link handle with "l" command
 	lReq := []lPayload{{Cmd: "l", N: folderHandle}}
 	lResBytes, lErr := callMegaAPI(sid, lReq)
 	if lErr != nil {
@@ -294,11 +287,38 @@ func ExportFolderViaS2(m *gomega.Mega, folderNode *gomega.Node) (string, string,
 
 	var lRes []string
 	if err := json.Unmarshal(lResBytes, &lRes); err != nil || len(lRes) == 0 || lRes[0] == "" {
-		return "", "", "", fmt.Errorf("could not parse public link id from response: %s", string(lResBytes))
+		// Fallback: sometimes l returns an object or int
+		var lStr string
+		if err2 := json.Unmarshal(lResBytes, &lStr); err2 == nil && lStr != "" {
+			lRes = []string{lStr}
+		} else {
+			return "", "", "", fmt.Errorf("could not parse public link id from response: %s", string(lResBytes))
+		}
 	}
 
 	linkHandle := lRes[0]
-	keyB64 := base64.RawURLEncoding.EncodeToString(finalShareKey)
+
+	// MEGA folder keys for public links require the 16-byte share key + 16-byte attributes IV/key mix (total 32 bytes / 43 base64url chars).
+	// Let's ensure the 32-byte complete decryption key is encoded if available, or padded to 32 bytes.
+	fullKey := make([]byte, 32)
+	copy(fullKey[:16], finalShareKey)
+	// If folder node has a key, decrypt it and use the extra 16 bytes for full decryption
+	for _, n := range fResp[0].F {
+		if n.Hash == folderHandle && n.Key != "" {
+			kParts := strings.Split(n.Key, ":")
+			if len(kParts) >= 2 {
+				itemKey := strings.Split(kParts[1], "/")[0]
+				if eb, decErr := base64.RawURLEncoding.DecodeString(itemKey); decErr == nil && len(eb) >= 32 {
+					plain := make([]byte, len(eb))
+					decryptECB(masterCipher, plain, eb)
+					copy(fullKey[16:], plain[16:32])
+				}
+			}
+			break
+		}
+	}
+
+	keyB64 := base64.RawURLEncoding.EncodeToString(fullKey)
 	publicURL := fmt.Sprintf("https://mega.nz/folder/%s#%s", linkHandle, keyB64)
 
 	return linkHandle, keyB64, publicURL, nil
